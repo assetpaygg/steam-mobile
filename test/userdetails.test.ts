@@ -1,6 +1,7 @@
 import SteamID from "steamid";
 import { describe, expect, it } from "vitest";
-import { parseUserDetails } from "../src/community/userDetails.js";
+import { parseUserDetails, tradePageError } from "../src/community/userDetails.js";
+import { TargetCannotTradeError, TradeBanError } from "../src/core/errors.js";
 
 const SELF_ACCOUNTID = new SteamID("76561198000000000").accountid;
 const PARTNER_ACCOUNTID = SteamID.fromIndividualAccountID(46143802).accountid;
@@ -67,5 +68,26 @@ describe("parseUserDetails", () => {
     const { me, them } = parseUserDetails(html, SELF_ACCOUNTID, PARTNER_ACCOUNTID);
     expect(me.avatarIcon).toBeUndefined();
     expect(them.avatarIcon).toBeUndefined();
+  });
+});
+
+describe("tradePageError", () => {
+  const errorPage = (msg: string) =>
+    `<div id="error_page_bg"><div id="error_msg">\n\t\t${msg}\n\t</div></div>`;
+
+  it("types a partner who cannot trade", () => {
+    const html = errorPage(
+      "OtherUser is not available to trade. More information will be shown to OtherUser if they invite you to trade.",
+    );
+    expect(tradePageError(html)).toBeInstanceOf(TargetCannotTradeError);
+  });
+
+  it("types a partner trade ban", () => {
+    const html = errorPage("You cannot trade with OtherUser because they have a trade ban.");
+    expect(tradePageError(html)).toBeInstanceOf(TradeBanError);
+  });
+
+  it("returns undefined for a normal trade page", () => {
+    expect(tradePageError(TRADE_PAGE)).toBeUndefined();
   });
 });

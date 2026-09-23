@@ -2111,8 +2111,12 @@ async function fetchUserDetails(http, url, referer, myAccountId, partnerAccountI
 	if (res.statusCode !== 200) throw httpError(res);
 	const html = res.body;
 	checkCommunityError(html);
-	if (!html.includes("g_rgAppContextData")) throw new SteamError("Failed to load the trade page for this user");
+	if (!html.includes("g_rgAppContextData")) throw tradePageError(html) ?? new SteamError("Failed to load the trade page for this user");
 	return parseUserDetails(html, myAccountId, partnerAccountId);
+}
+function tradePageError(html) {
+	const message = html.match(/<div id="error_msg">\s*([^<]+)\s*<\/div>/)?.[1];
+	return message ? parseStrError(message.replace(/\s+/g, " ").trim()) : void 0;
 }
 function buildPartnerTradePageUrl(partnerAccountId, token) {
 	return `${URLS.community}/tradeoffer/new/?partner=${partnerAccountId}${token ? `&token=${token}` : ""}`;

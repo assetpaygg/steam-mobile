@@ -1,5 +1,6 @@
 import { URLS } from "../core/constants.js";
 import { SteamError } from "../core/errors.js";
+import { parseStrError } from "../core/parseStrError.js";
 import { checkCommunityError, httpError } from "../http/checkers.js";
 import type { HttpClient } from "../http/HttpClient.js";
 
@@ -36,9 +37,16 @@ export async function fetchUserDetails(
   const html = res.body;
   checkCommunityError(html);
   if (!html.includes("g_rgAppContextData")) {
-    throw new SteamError("Failed to load the trade page for this user");
+    throw tradePageError(html) ?? new SteamError("Failed to load the trade page for this user");
   }
   return parseUserDetails(html, myAccountId, partnerAccountId);
+}
+
+// A partner we cannot trade with (trade ban, post-reset cooldown, ...) gets the error page, so the
+// reason is typed here instead of surfacing as a generic load failure.
+export function tradePageError(html: string): SteamError | undefined {
+  const message = html.match(/<div id="error_msg">\s*([^<]+)\s*<\/div>/)?.[1];
+  return message ? parseStrError(message.replace(/\s+/g, " ").trim()) : undefined;
 }
 
 export function buildPartnerTradePageUrl(partnerAccountId: number, token?: string): string {

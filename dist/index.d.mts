@@ -1059,42 +1059,6 @@ declare class CommunityNamespace {
   private getTheirInventory;
 }
 //#endregion
-//#region src/community/userDetails.d.ts
-interface UserSideDetails {
-  personaName: string;
-  contexts: Record<string, unknown> | null;
-  escrowDays: number;
-  avatarIcon: string | undefined;
-  avatarMedium: string | undefined;
-  avatarFull: string | undefined;
-}
-interface UserPartnerDetails extends UserSideDetails {
-  probation: boolean;
-}
-interface UserDetails {
-  me: UserSideDetails;
-  them: UserPartnerDetails;
-}
-//#endregion
-//#region src/core/constants.d.ts
-declare const LANG: {
-  readonly l: "english";
-  readonly language: "en";
-};
-declare const URLS: {
-  readonly community: "https://steamcommunity.com";
-  readonly store: "https://store.steampowered.com";
-  readonly help: "https://help.steampowered.com";
-  readonly api: "https://api.steampowered.com";
-};
-declare const DEFAULT_CONTEXTID = "2";
-//#endregion
-//#region src/core/eresults.d.ts
-declare const TRANSIENT_ERESULTS: ReadonlySet<number>;
-declare function isTransientEResult(eresult: number | undefined): boolean;
-declare const TERMINAL_AUTH_ERESULTS: ReadonlySet<number>;
-declare function isTerminalAuthEResult(eresult: number | undefined): boolean;
-//#endregion
 //#region src/core/errors.d.ts
 declare const DEFAULT_RATE_LIMIT_RETRY_MS = 60000;
 declare class SteamError extends Error {
@@ -1179,6 +1143,42 @@ declare class LoginError extends SteamError {
 declare class NoMobileAuthenticatorError extends LoginError {
   constructor(message?: string);
 }
+//#endregion
+//#region src/community/userDetails.d.ts
+interface UserSideDetails {
+  personaName: string;
+  contexts: Record<string, unknown> | null;
+  escrowDays: number;
+  avatarIcon: string | undefined;
+  avatarMedium: string | undefined;
+  avatarFull: string | undefined;
+}
+interface UserPartnerDetails extends UserSideDetails {
+  probation: boolean;
+}
+interface UserDetails {
+  me: UserSideDetails;
+  them: UserPartnerDetails;
+}
+//#endregion
+//#region src/core/constants.d.ts
+declare const LANG: {
+  readonly l: "english";
+  readonly language: "en";
+};
+declare const URLS: {
+  readonly community: "https://steamcommunity.com";
+  readonly store: "https://store.steampowered.com";
+  readonly help: "https://help.steampowered.com";
+  readonly api: "https://api.steampowered.com";
+};
+declare const DEFAULT_CONTEXTID = "2";
+//#endregion
+//#region src/core/eresults.d.ts
+declare const TRANSIENT_ERESULTS: ReadonlySet<number>;
+declare function isTransientEResult(eresult: number | undefined): boolean;
+declare const TERMINAL_AUTH_ERESULTS: ReadonlySet<number>;
+declare function isTerminalAuthEResult(eresult: number | undefined): boolean;
 //#endregion
 //#region src/core/offerState.d.ts
 declare function isTerminalState(state: ETradeOfferState): boolean;
