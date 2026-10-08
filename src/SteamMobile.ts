@@ -14,6 +14,7 @@ import {
 } from "./core/mobileProfile.js";
 import { HttpClient, type HttpResponse, type RequestOptions } from "./http/HttpClient.js";
 import { WebApiClient } from "./http/webApi.js";
+import { MarketNamespace } from "./market/MarketNamespace.js";
 import { SessionManager } from "./session/SessionManager.js";
 import type { PollOptions, TradeEvents } from "./trade/pollTypes.js";
 import { TradeNamespace } from "./trade/TradeNamespace.js";
@@ -44,6 +45,7 @@ export class SteamMobile extends EventEmitter<SteamMobileEvents> {
   readonly confirmations: ConfirmationManager;
   readonly trade: TradeNamespace;
   readonly community: CommunityNamespace;
+  readonly market: MarketNamespace;
   readonly identitySecret: string | undefined;
   private readonly polling: boolean | PollOptions | undefined;
   private readonly proxy: string | undefined;
@@ -70,6 +72,7 @@ export class SteamMobile extends EventEmitter<SteamMobileEvents> {
     );
     this.trade = new TradeNamespace(this.api, this.http, this.session, this.confirmations);
     this.community = new CommunityNamespace(this.http, this.session, this.confirmations, this.api);
+    this.market = new MarketNamespace(this.http, this.session, this.confirmations, this.api);
 
     this.session.on("refreshToken", (token) => this.emit("refreshToken", token));
     this.session.on("sessionExpired", (error) => this.emit("sessionExpired", error));

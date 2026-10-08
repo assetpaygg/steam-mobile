@@ -76,6 +76,23 @@ export {
   type SteamWebApiOptions,
 } from "./keyApi/SteamWebApi.js";
 export {
+  type MarketHistory,
+  type MarketHistoryEvent,
+  type MarketHistoryEventType,
+  type MarketListingEvent,
+  type MarketPurchase,
+  type MarketSale,
+  parseMarketHistory,
+} from "./market/history.js";
+export {
+  type ConfirmListingsResult,
+  type CreateBuyOrderOptions,
+  MarketNamespace,
+  type MyListings,
+  type SellItemOptions,
+} from "./market/MarketNamespace.js";
+export { getPriceValueAsInt } from "./market/prices.js";
+export {
   type AssetProperty,
   type EconItem,
   parseInventory,

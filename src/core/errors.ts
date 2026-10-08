@@ -72,6 +72,15 @@ export class RateLimitError extends SteamError {
   }
 }
 
+// Steam's 403 throttle wall on /market/orderbook (only that endpoint): it persists, so retrying right
+// away is pointless — back off this account until unlockAt.
+export class ThrottledError extends RateLimitError {
+  constructor(options: { message?: string; body?: unknown; retryAfterMs?: number } = {}) {
+    super({ message: "Throttled (403)", ...options, statusCode: 403 });
+    this.name = "ThrottledError";
+  }
+}
+
 export class EscrowError extends SteamError {
   readonly escrowDays: number;
 
@@ -143,6 +152,42 @@ export class PrivateInventoryError extends SteamError {
   constructor(message = "This profile's inventory is private.") {
     super(message);
     this.name = "PrivateInventoryError";
+  }
+}
+
+// sellitem refused over pending confirmations: too many listings awaiting mobile confirmation
+// (confirm them, then retry), or this item already has a listing pending confirmation — if no
+// confirmation exists for it any more, that listing is stuck until removed (cancelListing on its
+// listings_to_confirm entry).
+export class MarketConfirmationLimitError extends SteamError {
+  constructor(
+    message = "Too many listings pending confirmation",
+    options?: { eresult?: number; body?: unknown },
+  ) {
+    super(message, options);
+    this.name = "MarketConfirmationLimitError";
+  }
+}
+
+// The sale would push the wallet past Steam's maximum wallet balance.
+export class WalletBalanceLimitError extends SteamError {
+  constructor(
+    message = "Listing would exceed the maximum wallet balance",
+    options?: { eresult?: number; body?: unknown },
+  ) {
+    super(message, options);
+    this.name = "WalletBalanceLimitError";
+  }
+}
+
+// Account-level: the account is currently unable to use the Community Market.
+export class MarketBlockedError extends SteamError {
+  constructor(
+    message = "This account is currently unable to use the Community Market",
+    options?: { eresult?: number; body?: unknown },
+  ) {
+    super(message, options);
+    this.name = "MarketBlockedError";
   }
 }
 

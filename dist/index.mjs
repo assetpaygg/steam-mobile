@@ -307,6 +307,16 @@ var RateLimitError = class extends SteamError {
 		this.unlockAt = Date.now() + this.retryAfterMs;
 	}
 };
+var ThrottledError = class extends RateLimitError {
+	constructor(options = {}) {
+		super({
+			message: "Throttled (403)",
+			...options,
+			statusCode: 403
+		});
+		this.name = "ThrottledError";
+	}
+};
 var EscrowError = class extends SteamError {
 	escrowDays;
 	constructor(escrowDays, message) {
@@ -361,6 +371,24 @@ var PrivateInventoryError = class extends SteamError {
 	constructor(message = "This profile's inventory is private.") {
 		super(message);
 		this.name = "PrivateInventoryError";
+	}
+};
+var MarketConfirmationLimitError = class extends SteamError {
+	constructor(message = "Too many listings pending confirmation", options) {
+		super(message, options);
+		this.name = "MarketConfirmationLimitError";
+	}
+};
+var WalletBalanceLimitError = class extends SteamError {
+	constructor(message = "Listing would exceed the maximum wallet balance", options) {
+		super(message, options);
+		this.name = "WalletBalanceLimitError";
+	}
+};
+var MarketBlockedError = class extends SteamError {
+	constructor(message = "This account is currently unable to use the Community Market", options) {
+		super(message, options);
+		this.name = "MarketBlockedError";
 	}
 };
 var LoginError = class extends SteamError {
@@ -1293,7 +1321,7 @@ function queryParams(url) {
 	for (const [k, v] of new URL(url).searchParams) out[k] = v;
 	return out;
 }
-function decodeEntities(s) {
+function decodeEntities$1(s) {
 	return s.replace(/&quot;/g, "\"").replace(/&#0?39;/g, "'").replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function parseOpenidForm(html) {
@@ -1304,14 +1332,14 @@ function parseOpenidForm(html) {
 	for (const tag of (form[2] ?? "").match(/<input\b[^>]*>/gi) ?? []) {
 		const name = tag.match(/\bname=["']([^"']*)["']/i)?.[1];
 		if (!name) continue;
-		const value = decodeEntities(tag.match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? "");
+		const value = decodeEntities$1(tag.match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? "");
 		fields.push({
 			name,
 			value
 		});
 	}
 	return {
-		action: new URL(decodeEntities(action), STEAM_OPENID_URL).toString(),
+		action: new URL(decodeEntities$1(action), STEAM_OPENID_URL).toString(),
 		fields
 	};
 }
@@ -1894,6 +1922,425 @@ var SteamWebApi = class {
 		return response;
 	}
 };
+//#endregion
+//#region src/market/prices.ts
+function getPriceValueAsInt(strAmount) {
+	if (!strAmount) return 0;
+	let amount = String(strAmount);
+	amount = amount.replace(/,/g, ".");
+	amount = amount.replace(".--", ".00");
+	amount = amount.replace(/[^\d.]/g, "");
+	if (amount.indexOf(".") !== -1) {
+		const segments = amount.split(".");
+		const last = segments[segments.length - 1] ?? "";
+		if (!Number.isNaN(Number(last)) && last.length === 3 && segments[segments.length - 2] !== "0") amount = segments.join("");
+		else amount = `${segments.slice(0, -1).join("")}.${last}`;
+	}
+	const cents = Number.parseFloat(amount) * 100;
+	return Math.max(Math.floor(Number.isNaN(cents) ? 0 : cents + 1e-6), 0);
+}
+//#endregion
+//#region src/market/history.ts
+function parseMarketHistory(body) {
+	const history = {
+		sales: [],
+		purchases: [],
+		listingEvents: [],
+		totalCount: body.total_count
+	};
+	if (!body.results_html) return history;
+	const hovers = body.hovers ?? "";
+	const assets = body.assets ?? {};
+	const html = body.results_html.replace(/<!--[\s\S]*?-->/g, "");
+	for (const row of findByClass(html, "market_listing_row", "market_recent_listing_row")) {
+		const dates = findByClass(row.inner, "market_listing_listed_date");
+		const itemName = textOf(row.inner, "market_listing_item_name");
+		const gameName = textOf(row.inner, "market_listing_game_name");
+		const actedOn = dates[0] ? elementText(dates[0]).trim() : "";
+		const listedOn = dates[1] ? elementText(dates[1]).trim() : "";
+		const displayPrice = textOf(row.inner, "market_listing_price").trim();
+		const rowId = attrValue(row.attrs, "id") ?? "";
+		const priceInCents = getPriceValueAsInt(displayPrice);
+		if (priceInCents === 0 && displayPrice) throw new SteamError(`Market history price parsed to 0 cents for "${displayPrice}" in row ${rowId || "?"}`);
+		const gainOrLoss = textOf(row.inner, "market_listing_gainorloss").trim();
+		const type = gainOrLoss === "-" ? "sale" : gainOrLoss === "+" ? "purchase" : "listing_event";
+		const idMatch = rowId.match(/^history_row_(\d+)_(\d+)$/);
+		if (!idMatch) continue;
+		const listingid = idMatch[1];
+		const eventid = idMatch[2];
+		const event = {
+			itemName,
+			gameName,
+			listedOn,
+			actedOn,
+			displayPrice,
+			priceInCents,
+			type,
+			marketName: null,
+			appID: null,
+			contextID: null,
+			assetID: null,
+			classID: null,
+			instanceID: null,
+			unOwnedContextID: null,
+			unOwnedID: null
+		};
+		if (type !== "listing_event") attachAsset(event, rowId, hovers, assets);
+		if (type === "sale") history.sales.push({
+			historyId: rowId,
+			listingid,
+			receivedAmount: priceInCents,
+			...event
+		});
+		else if (type === "purchase") history.purchases.push({
+			historyId: rowId,
+			listingid,
+			paidAmount: priceInCents,
+			...event
+		});
+		else history.listingEvents.push({
+			historyId: rowId,
+			listingid,
+			eventid,
+			...event
+		});
+	}
+	return history;
+}
+function attachAsset(event, rowId, hovers, assets) {
+	try {
+		const args = hovers.split(`${rowId}_name`)[1].split(")")[0].split(",");
+		event.appID = Number.parseInt(args[1], 10);
+		event.contextID = args[2].split("'")[1] ?? null;
+		event.assetID = args[3].split("'")[1] ?? null;
+		if (event.contextID === null || event.assetID === null) return;
+		const asset = assets[String(event.appID)]?.[event.contextID]?.[event.assetID];
+		if (asset) {
+			event.classID = asset.classid ?? null;
+			event.instanceID = asset.instanceid ?? null;
+			event.unOwnedContextID = asset.unowned_contextid ?? null;
+			event.unOwnedID = asset.unowned_id ?? null;
+			event.marketName = asset.market_hash_name ?? null;
+		}
+	} catch {}
+}
+const TAG = /<([a-zA-Z][\w:-]*)((?:"[^"]*"|'[^']*'|[^'">])*)>/g;
+const VOID_TAGS = /* @__PURE__ */ new Set([
+	"area",
+	"base",
+	"br",
+	"col",
+	"embed",
+	"hr",
+	"img",
+	"input",
+	"link",
+	"meta",
+	"source",
+	"track",
+	"wbr"
+]);
+function findByClass(html, ...classes) {
+	const found = [];
+	for (const m of html.matchAll(TAG)) {
+		const attrs = m[2] ?? "";
+		const tokens = (attrValue(attrs, "class") ?? "").split(/\s+/);
+		if (!classes.every((c) => tokens.includes(c))) continue;
+		const tag = m[1].toLowerCase();
+		const start = m.index + m[0].length;
+		const empty = VOID_TAGS.has(tag) || attrs.trimEnd().endsWith("/");
+		found.push({
+			attrs,
+			inner: empty ? "" : html.slice(start, closeIndex(html, tag, start))
+		});
+	}
+	return found;
+}
+function closeIndex(html, tag, from) {
+	const re = new RegExp(`<(/?)${tag}\\b((?:"[^"]*"|'[^']*'|[^'">])*)>`, "gi");
+	re.lastIndex = from;
+	let depth = 1;
+	for (let m = re.exec(html); m; m = re.exec(html)) if (m[1]) {
+		if (--depth === 0) return m.index;
+	} else if (!(m[2] ?? "").trimEnd().endsWith("/")) depth++;
+	return html.length;
+}
+function attrValue(attrs, name) {
+	const m = attrs.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i"));
+	const raw = m?.[1] ?? m?.[2] ?? m?.[3];
+	return raw === void 0 ? void 0 : decodeEntities(raw);
+}
+function textOf(html, className) {
+	return findByClass(html, className).map(elementText).join("");
+}
+function elementText(el) {
+	return decodeEntities(el.inner.replace(/<(?:"[^"]*"|'[^']*'|[^'">])*>/g, ""));
+}
+const NAMED_ENTITIES = {
+	amp: "&",
+	lt: "<",
+	gt: ">",
+	quot: "\"",
+	apos: "'",
+	nbsp: "\xA0"
+};
+function decodeEntities(s) {
+	return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, ref) => {
+		if (ref[0] === "#") {
+			const code = ref[1] === "x" || ref[1] === "X" ? Number.parseInt(ref.slice(2), 16) : Number.parseInt(ref.slice(1), 10);
+			return code <= 1114111 ? String.fromCodePoint(code) : whole;
+		}
+		return NAMED_ENTITIES[ref.toLowerCase()] ?? whole;
+	});
+}
+//#endregion
+//#region src/market/MarketNamespace.ts
+const LISTINGS_PAGE_SIZE = 100;
+const MARKET_REFERER = `${URLS.community}/market/`;
+var MarketNamespace = class {
+	http;
+	session;
+	confirmations;
+	api;
+	constructor(http, session, confirmations, api) {
+		this.http = http;
+		this.session = session;
+		this.confirmations = confirmations;
+		this.api = api;
+	}
+	async getWalletDetails() {
+		const body = await this.api.call({
+			httpMethod: "GET",
+			iface: "IUserAccountService",
+			method: "GetClientWalletDetails",
+			input: {
+				include_balance_in_usd: 1,
+				include_formatted_balance: 1
+			}
+		});
+		if (!body.response) throw new SteamError("Malformed wallet details response", { body });
+		return body.response;
+	}
+	async getMyListings(options = {}) {
+		await this.session.getAccessToken();
+		const result = {
+			listings: [],
+			listings_to_confirm: [],
+			buy_orders: [],
+			num_active_listings: 0
+		};
+		let start = 0;
+		for (;;) {
+			const res = await this.http.get(`${URLS.community}/market/mylistings/`, {
+				responseType: "json",
+				searchParams: {
+					norender: 1,
+					currency: options.currency,
+					start,
+					count: LISTINGS_PAGE_SIZE
+				}
+			});
+			if (res.statusCode !== 200) throw httpError(res);
+			const body = res.body;
+			if (!body?.success) throw new SteamError("Steam returned success=false for /market/mylistings", { body });
+			if (body.num_active_listings !== void 0) result.num_active_listings = body.num_active_listings;
+			if (start === 0) {
+				if (Array.isArray(body.buy_orders)) result.buy_orders = body.buy_orders;
+				if (Array.isArray(body.listings_to_confirm)) result.listings_to_confirm = body.listings_to_confirm;
+			}
+			const page = body.listings ?? body.results?.listings ?? [];
+			result.listings.push(...page);
+			start += page.length;
+			if (start >= result.num_active_listings || page.length === 0) return result;
+		}
+	}
+	async getMyHistory(options = {}) {
+		await this.session.getAccessToken();
+		const res = await this.http.get(`${URLS.community}/market/myhistory`, {
+			responseType: "json",
+			searchParams: {
+				count: options.count ?? 500,
+				start: options.start
+			}
+		});
+		if (res.statusCode !== 200) throw httpError(res);
+		if (!res.body?.success) throw new SteamError("Steam returned success=false for /market/myhistory", { body: res.body });
+		return parseMarketHistory(res.body);
+	}
+	async getOrderbook(appid, marketHashName, options = {}) {
+		await this.session.getAccessToken();
+		const qp = encodeURIComponent(JSON.stringify([appid, marketHashName]));
+		const res = await this.http.get(`${URLS.community}/market/orderbook?q=Load&qp=${qp}`, { responseType: "json" });
+		if (res.statusCode === 403) throw new ThrottledError({ body: res.body });
+		if (res.statusCode !== 200) throw httpError(res);
+		const body = res.body;
+		const payload = body && body.success === void 0 && body.data ? body.data : body;
+		if (!payload?.success || !payload.data) throw new SteamError(`Bad orderbook response for ${marketHashName}`, { body });
+		const data = payload.data;
+		if (options.expectedCurrency && data.eCurrency !== options.expectedCurrency) throw new SteamError(`Orderbook currency ${data.eCurrency} != expected ${options.expectedCurrency} for ${marketHashName}`, { body });
+		return data;
+	}
+	async getPriceHistory(appid, marketHashName) {
+		await this.session.getAccessToken();
+		const res = await this.http.get(`${URLS.community}/market/pricehistory?appid=${appid}&market_hash_name=${encodeURIComponent(marketHashName)}`, { responseType: "json" });
+		if (res.statusCode !== 200) throw httpError(res);
+		if (!res.body?.success) throw new SteamError(`Steam returned success=false for pricehistory of ${marketHashName}`, { body: res.body });
+		return res.body.prices ?? [];
+	}
+	async getMarketItemDetails(appid, marketHashName) {
+		await this.session.getAccessToken();
+		const query = encodeURIComponent(`"${marketHashName}"`);
+		const res = await this.http.get(`${URLS.community}/market/search/render/?query=${query}&start=0&count=10&search_descriptions=0&sort_column=quantity&sort_dir=desc&appid=${appid}&norender=1`, { responseType: "json" });
+		if (res.statusCode !== 200) throw httpError(res);
+		const body = res.body;
+		if (!body || typeof body !== "object") throw new SteamError("Malformed market search response", { body });
+		return (Array.isArray(body.results) ? body.results : []).find((r) => r.hash_name === marketHashName) ?? null;
+	}
+	async sellItem(options) {
+		await this.session.getAccessToken();
+		const sessionid = await this.http.getSessionId();
+		const res = await this.http.post(`${URLS.community}/market/sellitem/`, {
+			responseType: "json",
+			form: {
+				sessionid,
+				appid: options.appid,
+				contextid: options.contextid ?? "2",
+				assetid: options.assetid,
+				amount: options.amount ?? 1,
+				price: options.price
+			},
+			headers: { Referer: MARKET_REFERER }
+		});
+		const body = res.body;
+		if (res.statusCode === 200 && (body?.success === true || body?.success === 1)) return body;
+		if (res.statusCode === 429) throw httpError(res);
+		if (body?.message) throw sellItemError(body.message, body);
+		if (res.statusCode !== 200) throw httpError(res);
+		throw new SteamError("Unknown error listing item", {
+			...eresultOf(body),
+			body
+		});
+	}
+	async cancelListing(listingId) {
+		await this.session.getAccessToken();
+		const sessionid = await this.http.getSessionId();
+		const res = await this.http.post(`${URLS.community}/market/removelisting/${listingId}`, {
+			form: { sessionid },
+			headers: { Referer: MARKET_REFERER }
+		});
+		const location = String(res.headers.location ?? "");
+		if (res.statusCode === 200 || res.statusCode === 302 && !location.includes("/login")) return;
+		throw httpError(res);
+	}
+	async createBuyOrder(options) {
+		await this.session.getAccessToken();
+		const sessionid = await this.http.getSessionId();
+		const referer = `${URLS.community}/market/listings/${options.appid}/${encodeURIComponent(options.marketHashName)}`;
+		const form = {
+			sessionid,
+			currency: options.currency,
+			appid: options.appid,
+			market_hash_name: options.marketHashName,
+			price_total: options.priceTotal,
+			quantity: options.quantity,
+			confirmation: 0
+		};
+		const first = await this.postBuyOrder(form, referer);
+		const direct = buyOrderId(first);
+		if (direct) return direct;
+		const confirmationId = first.body?.confirmation?.confirmation_id;
+		if (!confirmationId) throw buyOrderError(first, `No confirmation_id (HTTP ${first.statusCode})`);
+		await this.confirmations.acceptConfirmationForObject(String(confirmationId));
+		const final = await this.postBuyOrder({
+			...form,
+			confirmation: String(confirmationId)
+		}, referer);
+		const orderId = buyOrderId(final);
+		if (orderId) return orderId;
+		throw buyOrderError(final, `Finalization failed (HTTP ${final.statusCode})`);
+	}
+	async cancelBuyOrder(buyOrderId) {
+		await this.session.getAccessToken();
+		const sessionid = await this.http.getSessionId();
+		const res = await this.http.post(`${URLS.community}/market/cancelbuyorder/`, {
+			responseType: "json",
+			form: {
+				sessionid,
+				buy_orderid: buyOrderId
+			},
+			headers: { Referer: MARKET_REFERER }
+		});
+		if (res.statusCode !== 200) throw httpError(res);
+		return res.body ?? {};
+	}
+	async confirmListings(expected) {
+		if (Object.values(expected).reduce((sum, n) => sum + n, 0) === 0) return {
+			confirmed: [],
+			skipped: []
+		};
+		const listings = (await this.confirmations.getPending()).filter((c) => c.type === 3).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+		const remaining = { ...expected };
+		const confirmed = [];
+		const skipped = [];
+		for (const conf of listings) {
+			const name = (remaining[conf.sending] ?? 0) > 0 ? conf.sending : Object.keys(remaining).find((n) => (remaining[n] ?? 0) > 0 && n.includes(conf.sending));
+			if (name === void 0) {
+				skipped.push(conf);
+				continue;
+			}
+			confirmed.push(conf);
+			remaining[name] = (remaining[name] ?? 0) - 1;
+		}
+		await this.confirmations.acceptConfirmations(confirmed);
+		return {
+			confirmed,
+			skipped
+		};
+	}
+	async rejectListings(types = [3]) {
+		const matched = (await this.confirmations.getPending()).filter((c) => types.includes(c.type));
+		await this.confirmations.rejectConfirmations(matched);
+		return matched;
+	}
+	async postBuyOrder(form, referer) {
+		const res = await this.http.post(`${URLS.community}/market/createbuyorder/`, {
+			responseType: "json",
+			form,
+			headers: { Referer: referer }
+		});
+		if (res.statusCode === 429) throw httpError(res);
+		return res;
+	}
+};
+function eresultOf(body) {
+	const success = body?.success;
+	return typeof success === "number" && success !== 1 ? { eresult: success } : {};
+}
+function sellItemError(message, body) {
+	const options = {
+		...eresultOf(body),
+		body
+	};
+	const lower = message.toLowerCase();
+	if (lower.includes("pending confirmation")) return new MarketConfirmationLimitError(message, options);
+	if (lower.includes("maximum wallet balance")) return new WalletBalanceLimitError(message, options);
+	if (lower.includes("unable to use the community market")) return new MarketBlockedError(message, options);
+	return new SteamError(message, options);
+}
+function buyOrderId(res) {
+	const body = res.body;
+	const ok = body?.success === 1 || body?.success === true || body?.wallet_info?.success === 1;
+	return res.statusCode === 200 && ok && body?.buy_orderid ? String(body.buy_orderid) : void 0;
+}
+function buyOrderError(res, fallback) {
+	const body = res.body;
+	const eresult = eresultOf(body);
+	if (!body?.message && eresult.eresult === void 0 && ![200, 406].includes(res.statusCode)) return httpError(res);
+	return new SteamError(body?.message || fallback, {
+		...eresult,
+		body
+	});
+}
 /**
 * Describes the message CEconItemPreviewDataBlock.
 * Use `create(CEconItemPreviewDataBlockSchema)` to create a new message.
@@ -2978,6 +3425,7 @@ var SteamMobile = class extends EventEmitter {
 	confirmations;
 	trade;
 	community;
+	market;
 	identitySecret;
 	polling;
 	proxy;
@@ -2998,6 +3446,7 @@ var SteamMobile = class extends EventEmitter {
 		this.confirmations = new ConfirmationManager(this.http, this.session.steamID, options.identitySecret, profile);
 		this.trade = new TradeNamespace(this.api, this.http, this.session, this.confirmations);
 		this.community = new CommunityNamespace(this.http, this.session, this.confirmations, this.api);
+		this.market = new MarketNamespace(this.http, this.session, this.confirmations, this.api);
 		this.session.on("refreshToken", (token) => this.emit("refreshToken", token));
 		this.session.on("sessionExpired", (error) => this.emit("sessionExpired", error));
 		this.session.on("debug", (message) => this.emit("debug", message));
@@ -3057,6 +3506,6 @@ var SteamMobile = class extends EventEmitter {
 	}
 };
 //#endregion
-export { ANDROID_PROFILE, AccessTokenError, AuthClient, CommunityNamespace, ConfirmationError, ConfirmationManager, CredentialSession, DEFAULT_CONTEXTID, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, EscrowError, FamilyViewError, HttpClient, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, LANG, LoginError, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OpenIdError, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, RateLimitError, SessionManager, SteamError, SteamMobile, SteamSessionExpiredError, SteamWebApi, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, TradeBanError, TradeNamespace, TradeOffer, URLS, WebApiClient, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, loginWithCredentials, parseInventory, parseOpenidForm, parsePartnerInventory, resolveMobileProfile, resolveTarget, secondsUntilExpiry, steamOpenidLogin };
+export { ANDROID_PROFILE, AccessTokenError, AuthClient, CommunityNamespace, ConfirmationError, ConfirmationManager, CredentialSession, DEFAULT_CONTEXTID, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, EscrowError, FamilyViewError, HttpClient, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, LANG, LoginError, MarketBlockedError, MarketConfirmationLimitError, MarketNamespace, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OpenIdError, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, RateLimitError, SessionManager, SteamError, SteamMobile, SteamSessionExpiredError, SteamWebApi, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, ThrottledError, TradeBanError, TradeNamespace, TradeOffer, URLS, WalletBalanceLimitError, WebApiClient, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, getPriceValueAsInt, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, loginWithCredentials, parseInventory, parseMarketHistory, parseOpenidForm, parsePartnerInventory, resolveMobileProfile, resolveTarget, secondsUntilExpiry, steamOpenidLogin };
 
 //# sourceMappingURL=index.mjs.map

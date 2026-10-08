@@ -39,6 +39,7 @@ persistent CM connection.
 - [bot.trade](#bottrade) — sending, reading, and polling trade offers
 - [TradeOffer](#tradeoffer) — a single offer
 - [bot.community](#botcommunity) — inventories, profiles, trade URLs, API keys
+- [bot.market](#botmarket) — Community Market: listings, buy orders, history, order book
 - [bot.session](#botsession) — token lifecycle and sessions
 - [bot.confirmations](#botconfirmations) — low-level mobile confirmations
 - [decodePreviewToken](#decodepreviewtoken) — decode CS2 item inspect/certificate data
@@ -699,6 +700,116 @@ for completeness. Returns `Promise<void>`.
 
 ---
 
+## bot.market
+
+The Steam Community Market. Needs an account that can use the market (not limited). Responses are
+returned as Steam sends them (snake_case, unknown fields preserved); nothing is retried — rate limits
+surface as `RateLimitError` (HTTP 429) or its subclass `ThrottledError` (the order book's 403 wall).
+
+### getWalletDetails()
+
+Returns the wallet via `IUserAccountService/GetClientWalletDetails` as `Promise<RawWalletDetails>`:
+`has_wallet`, `balance` / `delayed_balance` (int64 cents, as strings), `currency_code` (the wallet
+currency id — `1` USD, `3` EUR, …), `formatted_balance`, and the rest of Steam's fields.
+
+### getMyListings(\[options])
+
+- `options`
+  - `currency` — Optional. Wallet currency id, sent as `currency`.
+
+Loads every page of your listings. Returns `Promise<MyListings>`:
+`{ listings, listings_to_confirm, buy_orders, num_active_listings }` with Steam's raw entries. A
+listing's `price` is what you receive and `fee` Steam's cut (the buyer pays `price + fee`).
+`listings_to_confirm` are listings still awaiting mobile confirmation; their item can't be relisted
+until the listing is confirmed or removed with [`cancelListing`](#cancellistinglistingid).
+
+### getMyHistory(\[options])
+
+- `options`
+  - `count` — Optional. Rows per page (default `500`).
+  - `start` — Optional. Row offset, for paging back.
+
+Parses the rendered market history into `Promise<MarketHistory>`:
+`{ sales, purchases, listingEvents, totalCount }`. Every event has `historyId`
+(`history_row_<listingid>_<eventid>`), `listingid`, `type`, `itemName`, `gameName`, `actedOn` /
+`listedOn` (display dates, no year), `displayPrice` and `priceInCents` (also as `receivedAmount` on
+sales and `paidAmount` on purchases). Sales and purchases also carry the asset: `appID`,
+`contextID`, `assetID`, `classID`, `instanceID`, `marketName`, `unOwnedContextID`, `unOwnedID`.
+Throws if a real price string parses to 0 cents. `parseMarketHistory(body)` is exported for raw
+responses.
+
+### getOrderbook(appid, marketHashName\[, options])
+
+- `options`
+  - `expectedCurrency` — Optional. Throw instead of returning a book in any other currency.
+
+Returns the live order book as `Promise<RawOrderbookData>`: `eCurrency`, `amtMinSellOrder` /
+`amtMaxBuyOrder` (best ask / bid in cents, `null` when that side is empty), and
+`rgCompactSellOrders` / `rgCompactBuyOrders` (flat `[price, qty, price, qty, …]`, best first). The
+endpoint always answers in the wallet currency.
+
+### getPriceHistory(appid, marketHashName)
+
+Returns the price history rows as `Promise<RawPriceHistoryPoint[]>` —
+`[date, price (major units), volume]`.
+
+### getMarketItemDetails(appid, marketHashName)
+
+Searches the market and returns the row whose `hash_name` matches exactly (`sell_listings`,
+`asset_description`), or `null`.
+
+### sellItem(options)
+
+- `options`
+  - `appid`, `assetid`
+  - `price` — What **you** receive, in cents (the buyer pays this plus fees).
+  - `contextid` — Optional (default `"2"`).
+  - `amount` — Optional (default `1`).
+
+Lists an item and returns Steam's response as `Promise<RawSellItemResponse>`. The listing still needs
+its mobile confirmation — see [`confirmListings`](#confirmlistingsexpected). Refusals throw
+`MarketConfirmationLimitError`, `WalletBalanceLimitError` or `MarketBlockedError`, otherwise a
+`SteamError` with Steam's message.
+
+### cancelListing(listingId)
+
+Removes a listing. Returns `Promise<void>`.
+
+### createBuyOrder(options)
+
+- `options`
+  - `appid`, `marketHashName`, `quantity`
+  - `priceTotal` — Price per unit × quantity, in cents.
+  - `currency` — Wallet currency id.
+
+Places a buy order and returns its `buy_orderid` as `Promise<string>`. When Steam answers with a
+mobile confirmation (HTTP 406), it is accepted (needs `identitySecret`) and the order finalized. A
+refusal is a `SteamError` whose `eresult` is Steam's code. Not retried: the confirmation id carries
+between steps, so re-run the whole call.
+
+### cancelBuyOrder(buyOrderId)
+
+Cancels a buy order and returns Steam's response as `Promise<RawCancelBuyOrderResponse>`.
+
+### confirmListings(expected)
+
+- `expected` — `{ [market_hash_name]: number of listings created }`.
+
+Accepts the pending market-listing confirmations that match, in one request: oldest first, exact name
+first, then a substring match (the confirmation text can omit the wear). Returns
+`Promise<{ confirmed, skipped }>` ([`Confirmation`](#confirmation)`[]` each); unmatched ones stay
+pending in `skipped`.
+
+### rejectListings(\[types])
+
+- `types` — Optional [`EConfirmationType`](#econfirmationtype)`[]` (default `[MarketListing]`; pass
+  `[BuyOrder]` for buy orders).
+
+Rejects every pending confirmation of those types in one request and returns them. Other types are
+never touched.
+
+---
+
 ## bot.session
 
 The `SessionManager` owns the token lifecycle. You rarely call it directly — the namespaces refresh the
@@ -757,6 +868,12 @@ Accept or reject (cancel) a single confirmation by its `id` and `nonce` (the `ke
 [`getPending`](#getpending)). Each returns `Promise<void>` and handles the time-offset + per-request
 HMAC timestamp for you.
 
+### acceptConfirmations(confs) · rejectConfirmations(confs)
+
+- `confs` — The confirmations to act on (`id` + `key`, e.g. from [`getPending`](#getpending)).
+
+Accept or reject a selected set in one request. Returns `Promise<void>`; an empty set is a no-op.
+
 ### acceptAll()
 
 Accepts every pending confirmation and resolves to the [`Confirmation`](#confirmation)`[]` it acted on.
@@ -776,13 +893,13 @@ Returns the outstanding confirmations as `Promise<`[`Confirmation`](#confirmatio
 
 ### respondToConfirmation(confID, confKey, time, key, accept)
 
-- `confID` — The confirmation id.
-- `confKey` — The confirmation's nonce.
+- `confID` — The confirmation id, or an array of ids.
+- `confKey` — The confirmation's nonce, or an array of nonces (same order as `confID`).
 - `time` — A Unix timestamp.
 - `key` — A confirmation key, or `{ tag, key }`.
 - `accept` — `true` to allow, `false` to cancel.
 
-Accepts or rejects a single confirmation. Returns `Promise<void>`.
+Accepts or rejects the confirmation(s) in one request. Returns `Promise<void>`.
 
 ### acceptConfirmationForObject(objectID)
 
@@ -1106,7 +1223,7 @@ All are exported and have the standard Steam numeric values.
 ### EConfirmationType
 
 `Invalid (0)`, `Generic (1)`, `Trade (2)`, `MarketListing (3)`, `FeatureOptOut (4)`,
-`PhoneNumberChange (5)`, `AccountRecovery (6)`.
+`PhoneNumberChange (5)`, `AccountRecovery (6)`, `BuyOrder (12)`.
 
 ### EOfferFilter
 
@@ -1145,6 +1262,7 @@ one shared classifier so the same `instanceof` check works everywhere.
 | `HttpStatusError` | `statusCode` | A non-2xx HTTP response. |
 | `SteamSessionExpiredError` | — | The session/token is no longer valid; re-authenticate. |
 | `RateLimitError` | `statusCode?`, `retryAfterMs`, `unlockAt` | Rate limited (HTTP 429 or eresult 84). `unlockAt` is a millisecond epoch when you may retry — **always populated** (a conservative default when Steam gives no hint). |
+| `ThrottledError` | (extends `RateLimitError`), `statusCode = 403` | The order book's 403 throttle wall. It persists, so back off rather than retry right away. |
 | `ProxyError` | `cause?` | A request through a configured proxy failed at the transport layer (unreachable / refused / timeout / auth). Only thrown when a `proxy` is set. |
 | `EscrowError` | `escrowDays` | The trade would be (or is) held in escrow. |
 | `TradeBanError` | — | The account is trade-banned. |
@@ -1155,6 +1273,9 @@ one shared classifier so the same `instanceof` check works everywhere.
 | `PrivateInventoryError` | — | Partner's inventory is private (or friends-only and we're not friends). A trade URL/token does **not** bypass inventory privacy. |
 | `ConfirmationError` | — | A mobile-confirmation step failed (incl. missing `identitySecret` when calling [`offer.confirm()`](#confirm)). |
 | `FamilyViewError` | — | Family View is restricting the account. |
+| `MarketConfirmationLimitError` | `eresult?` | `sellItem` refused over pending confirmations: too many listings awaiting confirmation, or this item already has one pending. |
+| `WalletBalanceLimitError` | `eresult?` | `sellItem` would push the wallet past Steam's maximum balance. |
+| `MarketBlockedError` | `eresult?` | The account is currently unable to use the Community Market. |
 | `LoginError` | `extendedErrorMessage?`, `isTransient` | Credential-login failure; `isTransient` is `true` for a retryable blip (timeout / service unavailable) rather than bad credentials. |
 | `NoMobileAuthenticatorError` | (extends `LoginError`) | `sharedSecret` was supplied but the account has no mobile authenticator attached, so TOTP can't answer the guard challenge. Use `steamGuardCode` / `onSteamGuardRequired` with an email code instead. |
 

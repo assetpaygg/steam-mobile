@@ -60,7 +60,7 @@ produce a refresh token before a client exists.
 trade events on the root. **Construction is synchronous** (no network; `steamID` comes from the
 refresh-token JWT); `await bot.login()` is the only network step (mints the token, applies the cookie,
 auto-starts polling if configured). `bot.reauthenticate(credentials)` recovers a dead/revoked refresh
-token (credential login reusing the instance's proxy/profile → `session.setRefreshToken`). The two
+token (credential login reusing the instance's proxy/profile → `session.setRefreshToken`). The three
 namespaces:
 
 - `bot.trade` (`src/trade/`) — `TradeNamespace` (an EventEmitter) + `TradeOffer` (fluent
@@ -73,6 +73,12 @@ namespaces:
 - `bot.community` (`src/community/`) — `CommunityNamespace` (inventory, profile, trade URLs, escrow
   scrape, API key) + `confirmations.ts` (`ConfirmationManager`: mobileconf engine, `m=react`, time
   offset, per-request HMAC timestamp dedup).
+- `bot.market` (`src/market/`) — `MarketNamespace`, ported from SCM-autoseller's `SteamApi`: listings
+  (`sellitem`/`removelisting`/`mylistings`), the 3-step `createbuyorder` flow (406 → mobile
+  confirmation → finalize, never retried per step), order book, price history, search, wallet
+  (`IUserAccountService/GetClientWalletDetails`), and batched market confirmations.
+  `history.ts` parses the rendered `/market/myhistory` HTML with regex stand-ins for the cheerio
+  selectors (no cheerio dependency); `prices.ts` is Steam's `GetPriceValueAsInt`.
 
 **Shared (`src/core/`)** — `enums.ts`, `errors.ts` (everything extends `SteamError`), `types.ts` (raw
 Steam JSON shapes), `constants.ts` (endpoints, renewal thresholds), `rateLimits.ts`, `paginate.ts`,
