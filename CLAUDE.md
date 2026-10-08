@@ -136,7 +136,8 @@ Debug scripts read a gitignored `.env` and reuse `./bot.refreshtoken` (also giti
 surface), `pnpm watch` (live trade-event watcher), `pnpm trade` (gated send→confirm→cancel; needs
 `SEND=1 PARTNER_TRADE_URL=…`), `pnpm partner-inventory` (load a partner's inventory via
 `/partnerinventory/`; surfaces typed inventory errors like `PrivateInventoryError`; needs
-`PARTNER_TRADE_URL=…`). Constraints when running live:
+`PARTNER_TRADE_URL=…`), `pnpm market-probe` (read-only market + account-status probe; prints field
+types to check the raw typings; needs a non-limited account). Constraints when running live:
 
 - The current test account is **limited** (hasn't spent the $5 that lifts Steam's anti-spam limit).
   Limited accounts **can still trade** (subject to Steam Guard / escrow holds) but can't use the market

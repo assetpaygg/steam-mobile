@@ -684,6 +684,20 @@ state, VAC status, privacy state, and the `isLimited` flag. (Steam level isn't i
 Returns the account's Steam level as a `Promise<number>` via `IPlayerService/GetSteamLevel` (which
 accepts the access token — no API key required).
 
+### getSteamGuardDetails()
+
+Returns Steam Guard state via `ICredentialsService/GetSteamGuardDetails` as
+`Promise<RawSteamGuardDetails>`: `is_steamguard_enabled`, `is_twofactor_enabled`,
+`is_phone_verified`, their enable times (`timestamp_*`, unix seconds) and `session_data[]`
+(per-machine `timestamp_machine_steamguard_enabled`). For Steam's own can-trade verdict (holds
+included) use `getWebTradeEligibility()`.
+
+### getTwoFactorStatus()
+
+Returns the mobile-authenticator status via `ITwoFactorService/QueryStatus` as
+`Promise<RawTwoFactorStatus>`: `state`, `email_validated`, `time_created`, and the rest of Steam's
+fields.
+
 ### community.ensureApiKey(\[domain])
 
 - `domain` — Optional hostname for the key (default `"assetpay.gg"`).
@@ -706,16 +720,22 @@ The Steam Community Market. Needs an account that can use the market (not limite
 returned as Steam sends them (snake_case, unknown fields preserved); nothing is retried — rate limits
 surface as `RateLimitError` (HTTP 429), and the order book's 403 wall as `ThrottledError`.
 
+**Currency.** `bot.market.walletCurrency` (`1` USD, `3` EUR, …) is learned by
+[`getWalletDetails()`](#getwalletdetails) or set by you. Once known it is sent with
+`getMyListings` / `createBuyOrder` and **enforced on every `getOrderbook`** — a book in another
+currency throws instead of being compared. Call `getWalletDetails()` first on each account.
+
 ### getWalletDetails()
 
 Returns the wallet via `IUserAccountService/GetClientWalletDetails` as `Promise<RawWalletDetails>`:
 `has_wallet`, `balance` / `delayed_balance` (int64 cents, as strings), `currency_code` (the wallet
-currency id — `1` USD, `3` EUR, …), `formatted_balance`, and the rest of Steam's fields.
+currency id — `1` USD, `3` EUR, …), `user_country_code`, `time_most_recent_txn`,
+`formatted_balance`, and the rest of Steam's fields. Sets `walletCurrency`.
 
 ### getMyListings(\[options])
 
 - `options`
-  - `currency` — Optional. Wallet currency id, sent as `currency`.
+  - `currency` — Optional. Wallet currency id, sent as `currency` (default `walletCurrency`).
 
 Loads every page of your listings. Returns `Promise<MyListings>`:
 `{ listings, listings_to_confirm, buy_orders, num_active_listings }` with Steam's raw entries. A
@@ -742,7 +762,8 @@ responses.
 ### getOrderbook(appid, marketHashName\[, options])
 
 - `options`
-  - `expectedCurrency` — Optional. Throw instead of returning a book in any other currency.
+  - `expectedCurrency` — Optional (default `walletCurrency`). Throw instead of returning a book in
+    any other currency.
 
 Returns the live order book as `Promise<RawOrderbookData>`: `eCurrency`, `amtMinSellOrder` /
 `amtMaxBuyOrder` (best ask / bid in cents, `null` — not `NaN` — when that side is empty), and
@@ -783,7 +804,7 @@ Removes a listing. Returns `Promise<void>`.
 - `options`
   - `appid`, `marketHashName`, `quantity`
   - `priceTotal` — Price per unit × quantity, in cents.
-  - `currency` — Wallet currency id.
+  - `currency` — Optional. Wallet currency id (default `walletCurrency`; throws if neither is known).
 
 Places a buy order and returns its `buy_orderid` as `Promise<string>`. When Steam answers with a
 mobile confirmation (HTTP 406), it is accepted (needs `identitySecret`) and the order finalized. A
@@ -1358,4 +1379,5 @@ pnpm smoke              # read-only health check across the whole API
 pnpm watch              # live trade-event watcher — send the bot a trade and watch it fire
 pnpm trade              # send → confirm → cancel lifecycle (gated: SEND=1 PARTNER_TRADE_URL=…; needs a non-limited bot)
 pnpm partner-inventory  # load a partner's inventory via /partnerinventory/ (PARTNER_TRADE_URL=…; surfaces PrivateInventoryError etc.)
+pnpm market-probe       # read-only market + account-status probe (PROBE_APPID / PROBE_ITEM; needs a non-limited account)
 ```

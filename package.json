@@ -63,7 +63,8 @@
     "trade": "tsx debug/trade.ts",
     "partner-inventory": "tsx debug/partnerInventory.ts",
     "own-inventory": "tsx debug/ownInventory.ts",
-    "trade-eligibility": "tsx debug/webTradeEligibility.ts"
+    "trade-eligibility": "tsx debug/webTradeEligibility.ts",
+    "market-probe": "tsx debug/marketProbe.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.1",

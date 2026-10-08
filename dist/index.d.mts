@@ -1021,6 +1021,42 @@ interface RawWalletDetails {
   formatted_balance?: string;
   [key: string]: unknown;
 }
+interface RawSteamGuardDetails {
+  is_steamguard_enabled?: boolean;
+  timestamp_steamguard_enabled?: number;
+  session_data?: RawSteamGuardSessionData[];
+  is_twofactor_enabled?: boolean;
+  timestamp_twofactor_enabled?: number;
+  is_phone_verified?: boolean;
+  [key: string]: unknown;
+}
+interface RawSteamGuardSessionData {
+  machine_id?: string;
+  machine_name_userchosen?: string;
+  timestamp_machine_steamguard_enabled?: number;
+  authentication_exists_from_geoloc_before_mintime?: boolean;
+  authentication_exists_from_same_ip_before_mintime?: boolean;
+  public_ipv4?: number;
+  public_ip_address?: string;
+  [key: string]: unknown;
+}
+interface RawTwoFactorStatus {
+  state?: number;
+  inactivation_reason?: number;
+  authenticator_type?: number;
+  authenticator_allowed?: boolean;
+  steamguard_scheme?: number;
+  token_gid?: string;
+  email_validated?: boolean;
+  device_identifier?: string;
+  time_created?: number;
+  revocation_attempts_remaining?: number;
+  classified_agent?: string;
+  allow_external_authenticator?: boolean;
+  time_transferred?: number;
+  version?: number;
+  [key: string]: unknown;
+}
 //#endregion
 //#region src/http/webApi.d.ts
 type Scalar = string | number | boolean;
@@ -1172,6 +1208,8 @@ declare class CommunityNamespace {
   getWebTradeEligibility(): Promise<WebTradeEligibility>;
   openidLogin(options: OpenidLoginOptions): Promise<OpenidLoginResult>;
   getSteamLevel(steamId?: string): Promise<number>;
+  getSteamGuardDetails(): Promise<RawSteamGuardDetails>;
+  getTwoFactorStatus(): Promise<RawTwoFactorStatus>;
   ensureApiKey(domain?: string): Promise<string | null>;
   private requestApiKey;
   getInventory(appid: number, contextid?: string, options?: GetInventoryOptions): Promise<EconItem[]>;
@@ -1516,7 +1554,7 @@ interface CreateBuyOrderOptions {
   marketHashName: string;
   priceTotal: number;
   quantity: number;
-  currency: number;
+  currency?: number;
 }
 interface ConfirmListingsResult {
   confirmed: Confirmation[];
@@ -1527,6 +1565,7 @@ declare class MarketNamespace {
   private readonly session;
   private readonly confirmations;
   private readonly api;
+  walletCurrency: number | undefined;
   constructor(http: HttpClient, session: SessionManager, confirmations: ConfirmationManager, api: WebApiClient);
   getWalletDetails(): Promise<RawWalletDetails>;
   getMyListings(options?: {
@@ -1881,5 +1920,5 @@ declare class Poller {
   private stamp;
 }
 //#endregion
-export { ANDROID_PROFILE, type AcceptResult, AccessTokenError, type ApiCallParams, type AssetProperty, AuthClient, type Badge, CommunityNamespace, type ConfirmListingsResult, type Confirmation, ConfirmationError, ConfirmationManager, type CreateBuyOrderOptions, CredentialSession, type CredentialSessionEvents, type CredentialStartOptions, DEFAULT_CONTEXTID, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, type EconItem, EscrowError, type EscrowHold, type EscrowSide, type ExchangeDetails, type ExchangeItem, FamilyViewError, type GetInventoryOptions, HttpClient, type HttpResponse, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, type JwtPayload, LANG, LoginError, type LoginResult, type LoginWithCredentialsOptions, MarketBlockedError, MarketConfirmationLimitError, type MarketHistory, type MarketHistoryEvent, type MarketHistoryEventType, type MarketHistoryRow, type MarketListingEvent, MarketNamespace, type MarketPurchase, type MarketSale, type MobilePlatform, type MobileProfile, type MyListings, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OfferTarget, OpenIdError, type OpenidConfirmation, type OpenidCookie, type OpenidLoginOptions, type OpenidLoginResult, type PlayerBadges, type PlayerBans, type PlayerSummary, type PollChange, type PollData, type PollDataStore, type PollOptions, type PollSource, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, type RateLimit, RateLimitError, type RateLimitedEndpoint, RawAsset, type RawAssetPropertyEntry, RawCEconTradeOffer, RawCancelBuyOrderResponse, RawCreateBuyOrderResponse, type RawDescription, RawExchangeAsset, RawGetTradeOffersResponse, RawGetTradeStatusResponse, type RawInventoryAsset, type RawInventoryResponse, RawMarketBuyOrder, RawMarketHistoryAsset, RawMarketHistoryResponse, RawMarketListing, RawMarketListingAsset, RawMarketSearchResponse, RawMarketSearchResult, RawMyListingsResponse, RawOrderbookData, type RawPartnerInventoryResponse, RawPriceHistoryPoint, RawPriceHistoryResponse, RawSellItemResponse, RawTradeStatus, RawWalletDetails, type ReauthenticateOptions, type RequestOptions, type ResolvedTarget, type SellItemOptions, type SendResult, SessionManager, type SessionManagerEvents, type SteamAction, type SteamDescriptionLine, SteamError, SteamMobile, type SteamMobileEvents, type SteamMobileOptions, type SteamProfile, SteamSessionExpiredError, type SteamTag, SteamWebApi, type SteamWebApiOptions, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, ThrottledError, TradeBanError, type TradeEvents, type TradeHistory, type TradeHistoryEntry, type TradeHistoryOptions, TradeItem, TradeNamespace, TradeOffer, type TradeOfferDeps, type TradeOfferUpdate, type TradeOffersSummary, URLS, type UserDetails, type UserPartnerDetails, type UserSideDetails, WalletBalanceLimitError, WebApiClient, WebTradeEligibility, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, getPriceValueAsInt, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, loginWithCredentials, parseInventory, parseMarketHistory, parseOpenidForm, parsePartnerInventory, resolveMobileProfile, resolveTarget, secondsUntilExpiry, steamOpenidLogin };
+export { ANDROID_PROFILE, type AcceptResult, AccessTokenError, type ApiCallParams, type AssetProperty, AuthClient, type Badge, CommunityNamespace, type ConfirmListingsResult, type Confirmation, ConfirmationError, ConfirmationManager, type CreateBuyOrderOptions, CredentialSession, type CredentialSessionEvents, type CredentialStartOptions, DEFAULT_CONTEXTID, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, type EconItem, EscrowError, type EscrowHold, type EscrowSide, type ExchangeDetails, type ExchangeItem, FamilyViewError, type GetInventoryOptions, HttpClient, type HttpResponse, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, type JwtPayload, LANG, LoginError, type LoginResult, type LoginWithCredentialsOptions, MarketBlockedError, MarketConfirmationLimitError, type MarketHistory, type MarketHistoryEvent, type MarketHistoryEventType, type MarketHistoryRow, type MarketListingEvent, MarketNamespace, type MarketPurchase, type MarketSale, type MobilePlatform, type MobileProfile, type MyListings, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OfferTarget, OpenIdError, type OpenidConfirmation, type OpenidCookie, type OpenidLoginOptions, type OpenidLoginResult, type PlayerBadges, type PlayerBans, type PlayerSummary, type PollChange, type PollData, type PollDataStore, type PollOptions, type PollSource, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, type RateLimit, RateLimitError, type RateLimitedEndpoint, RawAsset, type RawAssetPropertyEntry, RawCEconTradeOffer, RawCancelBuyOrderResponse, RawCreateBuyOrderResponse, type RawDescription, RawExchangeAsset, RawGetTradeOffersResponse, RawGetTradeStatusResponse, type RawInventoryAsset, type RawInventoryResponse, RawMarketBuyOrder, RawMarketHistoryAsset, RawMarketHistoryResponse, RawMarketListing, RawMarketListingAsset, RawMarketSearchResponse, RawMarketSearchResult, RawMyListingsResponse, RawOrderbookData, type RawPartnerInventoryResponse, RawPriceHistoryPoint, RawPriceHistoryResponse, RawSellItemResponse, RawSteamGuardDetails, RawSteamGuardSessionData, RawTradeStatus, RawTwoFactorStatus, RawWalletDetails, type ReauthenticateOptions, type RequestOptions, type ResolvedTarget, type SellItemOptions, type SendResult, SessionManager, type SessionManagerEvents, type SteamAction, type SteamDescriptionLine, SteamError, SteamMobile, type SteamMobileEvents, type SteamMobileOptions, type SteamProfile, SteamSessionExpiredError, type SteamTag, SteamWebApi, type SteamWebApiOptions, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, ThrottledError, TradeBanError, type TradeEvents, type TradeHistory, type TradeHistoryEntry, type TradeHistoryOptions, TradeItem, TradeNamespace, TradeOffer, type TradeOfferDeps, type TradeOfferUpdate, type TradeOffersSummary, URLS, type UserDetails, type UserPartnerDetails, type UserSideDetails, WalletBalanceLimitError, WebApiClient, WebTradeEligibility, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, getPriceValueAsInt, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, loginWithCredentials, parseInventory, parseMarketHistory, parseOpenidForm, parsePartnerInventory, resolveMobileProfile, resolveTarget, secondsUntilExpiry, steamOpenidLogin };
 //# sourceMappingURL=index.d.mts.map

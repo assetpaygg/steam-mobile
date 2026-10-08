@@ -54,8 +54,8 @@ export interface CreateBuyOrderOptions {
   // Price per unit × quantity, in cents.
   priceTotal: number;
   quantity: number;
-  // Wallet currency id (1 = USD, 3 = EUR, …).
-  currency: number;
+  // Wallet currency id (1 = USD, 3 = EUR, …); defaults to walletCurrency.
+  currency?: number;
 }
 
 export interface ConfirmListingsResult {
@@ -72,6 +72,10 @@ interface OrderbookEnvelope {
 // Steam Community Market (ported from SCM-autoseller's SteamApi). Retries and proxy rotation stay
 // with the caller; failures surface as typed errors.
 export class MarketNamespace {
+  // Wallet currency id (1 = USD, 3 = EUR, …), learned by getWalletDetails() or set by the caller. Once
+  // known it is sent with listings / buy orders and enforced on every order book.
+  walletCurrency: number | undefined;
+
   constructor(
     private readonly http: HttpClient,
     private readonly session: SessionManager,
@@ -89,11 +93,13 @@ export class MarketNamespace {
       input: { include_balance_in_usd: 1, include_formatted_balance: 1 },
     });
     if (!body.response) throw new SteamError("Malformed wallet details response", { body });
+    const currency = body.response.currency_code;
+    if (typeof currency === "number" && currency > 0) this.walletCurrency = currency;
     return body.response;
   }
 
   // All active listings, paginated. Buy orders and listings awaiting confirmation ride whole on
-  // every page, so they're taken from the first. Pass the wallet currency (as SCM-autoseller does).
+  // every page, so they're taken from the first. currency defaults to walletCurrency.
   async getMyListings(options: { currency?: number } = {}): Promise<MyListings> {
     await this.session.getAccessToken();
     const result: MyListings = {
@@ -110,7 +116,7 @@ export class MarketNamespace {
           responseType: "json",
           searchParams: {
             norender: 1,
-            currency: options.currency,
+            currency: options.currency ?? this.walletCurrency,
             start,
             count: LISTINGS_PAGE_SIZE,
           },
@@ -159,8 +165,8 @@ export class MarketNamespace {
   }
 
   // Live order book by appid + market_hash_name (no item_nameid needed). The endpoint always answers
-  // in the wallet currency; pass expectedCurrency to refuse a book in any other one rather than
-  // compare prices across currencies.
+  // in the wallet currency; a book in any other currency than expectedCurrency (default:
+  // walletCurrency, when known) is refused rather than have prices compared across currencies.
   async getOrderbook(
     appid: number,
     marketHashName: string,
@@ -184,9 +190,10 @@ export class MarketNamespace {
       throw new SteamError(`Bad orderbook response for ${marketHashName}`, { body });
     }
     const data = payload.data as RawOrderbookData;
-    if (options.expectedCurrency && data.eCurrency !== options.expectedCurrency) {
+    const expected = options.expectedCurrency ?? this.walletCurrency;
+    if (expected && data.eCurrency !== expected) {
       throw new SteamError(
-        `Orderbook currency ${data.eCurrency} != expected ${options.expectedCurrency} for ${marketHashName}`,
+        `Orderbook currency ${data.eCurrency} != expected ${expected} for ${marketHashName}`,
         { body },
       );
     }
@@ -280,12 +287,16 @@ export class MarketNamespace {
   // confirmation was accepted (step 3) may still have placed the order: check getMyListings first.
   // Resolves with the buy_orderid; a refusal is a SteamError carrying Steam's code (body.success).
   async createBuyOrder(options: CreateBuyOrderOptions): Promise<string> {
+    const currency = options.currency ?? this.walletCurrency;
+    if (!currency) {
+      throw new SteamError("Wallet currency unknown — call getWalletDetails() or pass currency");
+    }
     await this.session.getAccessToken();
     const sessionid = await this.http.getSessionId();
     const referer = `${URLS.community}/market/listings/${options.appid}/${encodeURIComponent(options.marketHashName)}`;
     const form: Record<string, string | number> = {
       sessionid,
-      currency: options.currency,
+      currency,
       appid: options.appid,
       market_hash_name: options.marketHashName,
       price_total: options.priceTotal,

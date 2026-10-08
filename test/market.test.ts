@@ -737,3 +737,54 @@ describe("MarketNamespace confirmations", () => {
     expect(confirmations.rejected.map((batch) => batch.map((c) => c.id))).toEqual([["1"], ["2"]]);
   });
 });
+
+describe("MarketNamespace wallet currency", () => {
+  const book = (eCurrency: number) => ({
+    body: { success: true, data: { eCurrency, rgCompactSellOrders: [], rgCompactBuyOrders: [] } },
+  });
+
+  it("learns the currency from the wallet and keeps EUR and USD accounts apart", async () => {
+    const eur = makeMarket({ response: { has_wallet: true, currency_code: 3 } });
+    const usd = makeMarket({ response: { has_wallet: true, currency_code: 1 } });
+    await eur.market.getWalletDetails();
+    await usd.market.getWalletDetails();
+    expect(eur.market.walletCurrency).toBe(3);
+    expect(usd.market.walletCurrency).toBe(1);
+
+    eur.http.reply(book(3), book(1));
+    usd.http.reply(book(1), book(3));
+    await expect(eur.market.getOrderbook(730, "X")).resolves.toMatchObject({ eCurrency: 3 });
+    await expect(eur.market.getOrderbook(730, "X")).rejects.toThrow(/currency 1 != expected 3/);
+    await expect(usd.market.getOrderbook(730, "X")).resolves.toMatchObject({ eCurrency: 1 });
+    await expect(usd.market.getOrderbook(730, "X")).rejects.toThrow(/currency 3 != expected 1/);
+  });
+
+  it("does not learn a currency from a wallet without one", async () => {
+    const { market } = makeMarket({ response: { has_wallet: false, currency_code: 0 } });
+    await market.getWalletDetails();
+    expect(market.walletCurrency).toBeUndefined();
+  });
+
+  it("sends the known currency with mylistings and createbuyorder; explicit values win", async () => {
+    const { market, http } = makeMarket();
+    market.walletCurrency = 1;
+    http.reply(
+      { body: { success: true, num_active_listings: 0, listings: [] } },
+      { body: { success: 1, buy_orderid: "1" } },
+      { body: { success: true, data: { eCurrency: 3 } } },
+    );
+    await market.getMyListings();
+    await market.createBuyOrder({ appid: 730, marketHashName: "X", priceTotal: 5, quantity: 1 });
+    await market.getOrderbook(730, "X", { expectedCurrency: 3 });
+    expect(http.requests[0]!.opts.searchParams!.currency).toBe(1);
+    expect(http.requests[1]!.opts.form!.currency).toBe(1);
+  });
+
+  it("refuses a buy order when the currency is unknown, before any request", async () => {
+    const { market, http } = makeMarket();
+    await expect(
+      market.createBuyOrder({ appid: 730, marketHashName: "X", priceTotal: 5, quantity: 1 }),
+    ).rejects.toThrow(/currency unknown/);
+    expect(http.requests).toHaveLength(0);
+  });
+});

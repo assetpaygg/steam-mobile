@@ -1498,6 +1498,25 @@ var CommunityNamespace = class {
 			input: { steamid: id }
 		})).response?.player_level ?? 0;
 	}
+	async getSteamGuardDetails() {
+		const body = await this.api.call({
+			httpMethod: "GET",
+			iface: "ICredentialsService",
+			method: "GetSteamGuardDetails"
+		});
+		if (!body.response) throw new SteamError("Malformed Steam Guard details response", { body });
+		return body.response;
+	}
+	async getTwoFactorStatus() {
+		const body = await this.api.call({
+			httpMethod: "POST",
+			iface: "ITwoFactorService",
+			method: "QueryStatus",
+			input: { steamid: this.session.steamID.getSteamID64() }
+		});
+		if (!body.response) throw new SteamError("Malformed two-factor status response", { body });
+		return body.response;
+	}
 	async ensureApiKey(domain = "assetpay.gg") {
 		await this.session.getAccessToken();
 		const res = await this.http.get(`${URLS.community}/dev/apikey?l=english`, { responseType: "text" });
@@ -2106,6 +2125,7 @@ var MarketNamespace = class {
 	session;
 	confirmations;
 	api;
+	walletCurrency;
 	constructor(http, session, confirmations, api) {
 		this.http = http;
 		this.session = session;
@@ -2123,6 +2143,8 @@ var MarketNamespace = class {
 			}
 		});
 		if (!body.response) throw new SteamError("Malformed wallet details response", { body });
+		const currency = body.response.currency_code;
+		if (typeof currency === "number" && currency > 0) this.walletCurrency = currency;
 		return body.response;
 	}
 	async getMyListings(options = {}) {
@@ -2139,7 +2161,7 @@ var MarketNamespace = class {
 				responseType: "json",
 				searchParams: {
 					norender: 1,
-					currency: options.currency,
+					currency: options.currency ?? this.walletCurrency,
 					start,
 					count: LISTINGS_PAGE_SIZE
 				}
@@ -2181,7 +2203,8 @@ var MarketNamespace = class {
 		const payload = body && body.success === void 0 && body.data ? body.data : body;
 		if (!payload?.success || !payload.data) throw new SteamError(`Bad orderbook response for ${marketHashName}`, { body });
 		const data = payload.data;
-		if (options.expectedCurrency && data.eCurrency !== options.expectedCurrency) throw new SteamError(`Orderbook currency ${data.eCurrency} != expected ${options.expectedCurrency} for ${marketHashName}`, { body });
+		const expected = options.expectedCurrency ?? this.walletCurrency;
+		if (expected && data.eCurrency !== expected) throw new SteamError(`Orderbook currency ${data.eCurrency} != expected ${expected} for ${marketHashName}`, { body });
 		return data;
 	}
 	async getPriceHistory(appid, marketHashName) {
@@ -2236,12 +2259,14 @@ var MarketNamespace = class {
 		throw httpError(res);
 	}
 	async createBuyOrder(options) {
+		const currency = options.currency ?? this.walletCurrency;
+		if (!currency) throw new SteamError("Wallet currency unknown — call getWalletDetails() or pass currency");
 		await this.session.getAccessToken();
 		const sessionid = await this.http.getSessionId();
 		const referer = `${URLS.community}/market/listings/${options.appid}/${encodeURIComponent(options.marketHashName)}`;
 		const form = {
 			sessionid,
-			currency: options.currency,
+			currency,
 			appid: options.appid,
 			market_hash_name: options.marketHashName,
 			price_total: options.priceTotal,

@@ -237,3 +237,45 @@ export interface RawWalletDetails {
   formatted_balance?: string;
   [key: string]: unknown;
 }
+
+// ICredentialsService/GetSteamGuardDetails (CCredentials_GetSteamGuardDetails_Response). Times are unix
+// seconds; 64-bit ids arrive as strings.
+export interface RawSteamGuardDetails {
+  is_steamguard_enabled?: boolean;
+  timestamp_steamguard_enabled?: number;
+  session_data?: RawSteamGuardSessionData[];
+  is_twofactor_enabled?: boolean;
+  timestamp_twofactor_enabled?: number;
+  is_phone_verified?: boolean;
+  [key: string]: unknown;
+}
+
+export interface RawSteamGuardSessionData {
+  machine_id?: string;
+  machine_name_userchosen?: string;
+  timestamp_machine_steamguard_enabled?: number;
+  authentication_exists_from_geoloc_before_mintime?: boolean;
+  authentication_exists_from_same_ip_before_mintime?: boolean;
+  public_ipv4?: number;
+  public_ip_address?: string;
+  [key: string]: unknown;
+}
+
+// ITwoFactorService/QueryStatus (CTwoFactor_Status_Response).
+export interface RawTwoFactorStatus {
+  state?: number;
+  inactivation_reason?: number;
+  authenticator_type?: number;
+  authenticator_allowed?: boolean;
+  steamguard_scheme?: number;
+  token_gid?: string;
+  email_validated?: boolean;
+  device_identifier?: string;
+  time_created?: number;
+  revocation_attempts_remaining?: number;
+  classified_agent?: string;
+  allow_external_authenticator?: boolean;
+  time_transferred?: number;
+  version?: number;
+  [key: string]: unknown;
+}
