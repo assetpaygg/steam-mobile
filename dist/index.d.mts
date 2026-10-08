@@ -922,9 +922,10 @@ interface RawMarketBuyOrder {
   buy_orderid: string;
   appid: number;
   hash_name: string;
-  price: number | string;
-  quantity: number | string;
-  quantity_remaining: number | string;
+  wallet_currency: number;
+  price: string;
+  quantity: string;
+  quantity_remaining: string;
   description?: RawDescription;
   [key: string]: unknown;
 }
@@ -983,6 +984,10 @@ interface RawMarketSearchResponse {
 interface RawSellItemResponse {
   success?: boolean | number;
   message?: string;
+  requires_confirmation?: number;
+  needs_mobile_confirmation?: boolean;
+  needs_email_confirmation?: boolean;
+  email_domain?: string;
   [key: string]: unknown;
 }
 interface RawCreateBuyOrderResponse {
