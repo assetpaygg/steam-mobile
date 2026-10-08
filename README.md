@@ -704,7 +704,7 @@ for completeness. Returns `Promise<void>`.
 
 The Steam Community Market. Needs an account that can use the market (not limited). Responses are
 returned as Steam sends them (snake_case, unknown fields preserved); nothing is retried — rate limits
-surface as `RateLimitError` (HTTP 429) or its subclass `ThrottledError` (the order book's 403 wall).
+surface as `RateLimitError` (HTTP 429), and the order book's 403 wall as `ThrottledError`.
 
 ### getWalletDetails()
 
@@ -730,8 +730,9 @@ until the listing is confirmed or removed with [`cancelListing`](#cancellistingl
   - `start` — Optional. Row offset, for paging back.
 
 Parses the rendered market history into `Promise<MarketHistory>`:
-`{ sales, purchases, listingEvents, totalCount }`. Every event has `historyId`
-(`history_row_<listingid>_<eventid>`), `listingid`, `type`, `itemName`, `gameName`, `actedOn` /
+`{ events, sales, purchases, listingEvents, totalCount }` — `events` is every row in page order
+(newest first), the others split it by `type`. Every event has `historyId`
+(`history_row_<listingid>_<eventid>`), `listingid`, `eventid`, `type`, `itemName`, `gameName`, `actedOn` /
 `listedOn` (display dates, no year), `displayPrice` and `priceInCents` (also as `receivedAmount` on
 sales and `paidAmount` on purchases). Sales and purchases also carry the asset: `appID`,
 `contextID`, `assetID`, `classID`, `instanceID`, `marketName`, `unOwnedContextID`, `unOwnedID`.
@@ -744,14 +745,16 @@ responses.
   - `expectedCurrency` — Optional. Throw instead of returning a book in any other currency.
 
 Returns the live order book as `Promise<RawOrderbookData>`: `eCurrency`, `amtMinSellOrder` /
-`amtMaxBuyOrder` (best ask / bid in cents, `null` when that side is empty), and
+`amtMaxBuyOrder` (best ask / bid in cents, `null` — not `NaN` — when that side is empty), and
 `rgCompactSellOrders` / `rgCompactBuyOrders` (flat `[price, qty, price, qty, …]`, best first). The
-endpoint always answers in the wallet currency.
+endpoint always answers in the wallet currency. A 403 here is Steam's order-book throttle wall and
+throws `ThrottledError`.
 
 ### getPriceHistory(appid, marketHashName)
 
 Returns the price history rows as `Promise<RawPriceHistoryPoint[]>` —
-`[date, price (major units), volume]`.
+`[date, price (major units), volume]`; `[]` for an item without sales history. Throws when Steam
+answers `success: false`.
 
 ### getMarketItemDetails(appid, marketHashName)
 
@@ -785,7 +788,8 @@ Removes a listing. Returns `Promise<void>`.
 Places a buy order and returns its `buy_orderid` as `Promise<string>`. When Steam answers with a
 mobile confirmation (HTTP 406), it is accepted (needs `identitySecret`) and the order finalized. A
 refusal is a `SteamError` whose `eresult` is Steam's code. Not retried: the confirmation id carries
-between steps, so re-run the whole call.
+between steps, so re-run the whole call — but a failure after the confirmation was accepted may
+still have placed the order, so check [`getMyListings`](#getmylistingsoptions) first.
 
 ### cancelBuyOrder(buyOrderId)
 
@@ -796,7 +800,7 @@ Cancels a buy order and returns Steam's response as `Promise<RawCancelBuyOrderRe
 - `expected` — `{ [market_hash_name]: number of listings created }`.
 
 Accepts the pending market-listing confirmations that match, in one request: oldest first, exact name
-first, then a substring match (the confirmation text can omit the wear). Returns
+first, then a substring match (the confirmation text can omit the wear; an empty one never matches). Returns
 `Promise<{ confirmed, skipped }>` ([`Confirmation`](#confirmation)`[]` each); unmatched ones stay
 pending in `skipped`.
 
@@ -1262,7 +1266,7 @@ one shared classifier so the same `instanceof` check works everywhere.
 | `HttpStatusError` | `statusCode` | A non-2xx HTTP response. |
 | `SteamSessionExpiredError` | — | The session/token is no longer valid; re-authenticate. |
 | `RateLimitError` | `statusCode?`, `retryAfterMs`, `unlockAt` | Rate limited (HTTP 429 or eresult 84). `unlockAt` is a millisecond epoch when you may retry — **always populated** (a conservative default when Steam gives no hint). |
-| `ThrottledError` | (extends `RateLimitError`), `statusCode = 403` | The order book's 403 throttle wall. It persists, so back off rather than retry right away. |
+| `ThrottledError` | `statusCode = 403` | The order book's 403 throttle wall. Not a `RateLimitError`: it persists and switching proxy doesn't help — stop using the account for a while. |
 | `ProxyError` | `cause?` | A request through a configured proxy failed at the transport layer (unreachable / refused / timeout / auth). Only thrown when a `proxy` is set. |
 | `EscrowError` | `escrowDays` | The trade would be (or is) held in escrow. |
 | `TradeBanError` | — | The account is trade-banned. |

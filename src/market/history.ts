@@ -9,6 +9,9 @@ export type MarketHistoryEventType = "sale" | "purchase" | "listing_event";
 // One rendered /market/myhistory row; field names as SCM-autoseller (CSFloat's extractHistoryEvents)
 // uses them. Asset identity is only resolvable on sales/purchases — listing events have no hover data.
 export interface MarketHistoryEvent {
+  historyId: string; // history_row_<listingid>_<eventid>
+  listingid: string;
+  eventid: string;
   itemName: string;
   gameName: string;
   listedOn: string;
@@ -27,24 +30,24 @@ export interface MarketHistoryEvent {
 }
 
 export interface MarketSale extends MarketHistoryEvent {
-  historyId: string;
-  listingid: string;
+  type: "sale";
   receivedAmount: number;
 }
 
 export interface MarketPurchase extends MarketHistoryEvent {
-  historyId: string;
-  listingid: string;
+  type: "purchase";
   paidAmount: number;
 }
 
 export interface MarketListingEvent extends MarketHistoryEvent {
-  historyId: string;
-  listingid: string;
-  eventid: string;
+  type: "listing_event";
 }
 
+export type MarketHistoryRow = MarketSale | MarketPurchase | MarketListingEvent;
+
 export interface MarketHistory {
+  // Every row in page order (newest first) — the interleaving that sales/purchases alone lose.
+  events: MarketHistoryRow[];
   sales: MarketSale[];
   purchases: MarketPurchase[];
   listingEvents: MarketListingEvent[];
@@ -55,6 +58,7 @@ export interface MarketHistory {
 // duplicates listings and misreports purchase amounts, while the rows carry an unambiguous +/-.
 export function parseMarketHistory(body: RawMarketHistoryResponse): MarketHistory {
   const history: MarketHistory = {
+    events: [],
     sales: [],
     purchases: [],
     listingEvents: [],
@@ -88,10 +92,10 @@ export function parseMarketHistory(body: RawMarketHistoryResponse): MarketHistor
 
     const idMatch = rowId.match(/^history_row_(\d+)_(\d+)$/);
     if (!idMatch) continue;
-    const listingid = idMatch[1]!;
-    const eventid = idMatch[2]!;
-
     const event: MarketHistoryEvent = {
+      historyId: rowId,
+      listingid: idMatch[1]!,
+      eventid: idMatch[2]!,
       itemName,
       gameName,
       listedOn,
@@ -111,11 +115,17 @@ export function parseMarketHistory(body: RawMarketHistoryResponse): MarketHistor
     if (type !== "listing_event") attachAsset(event, rowId, hovers, assets);
 
     if (type === "sale") {
-      history.sales.push({ historyId: rowId, listingid, receivedAmount: priceInCents, ...event });
+      const sale: MarketSale = { ...event, type, receivedAmount: priceInCents };
+      history.sales.push(sale);
+      history.events.push(sale);
     } else if (type === "purchase") {
-      history.purchases.push({ historyId: rowId, listingid, paidAmount: priceInCents, ...event });
+      const purchase: MarketPurchase = { ...event, type, paidAmount: priceInCents };
+      history.purchases.push(purchase);
+      history.events.push(purchase);
     } else {
-      history.listingEvents.push({ historyId: rowId, listingid, eventid, ...event });
+      const listingEvent: MarketListingEvent = { ...event, type };
+      history.listingEvents.push(listingEvent);
+      history.events.push(listingEvent);
     }
   }
   return history;
@@ -205,12 +215,15 @@ function closeIndex(html: string, tag: string, from: number): number {
   return html.length;
 }
 
+// Walk attributes left to right so a quoted value (title="… id=…") is never mistaken for another
+// attribute; the first occurrence wins, as in an HTML parser.
+const ATTR = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+
 function attrValue(attrs: string, name: string): string | undefined {
-  const m = attrs.match(
-    new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i"),
-  );
-  const raw = m?.[1] ?? m?.[2] ?? m?.[3];
-  return raw === undefined ? undefined : decodeEntities(raw);
+  for (const m of attrs.matchAll(ATTR)) {
+    if (m[1]!.toLowerCase() === name) return decodeEntities(m[2] ?? m[3] ?? m[4] ?? "");
+  }
+  return undefined;
 }
 
 // cheerio's .text() over a selection: the concatenated text of every match.
@@ -222,6 +235,7 @@ function elementText(el: HtmlElement): string {
   return decodeEntities(el.inner.replace(/<(?:"[^"]*"|'[^']*'|[^'">])*>/g, ""));
 }
 
+// Steam escapes row text with htmlspecialchars (&amp; &lt; &gt; &quot; &#039;); a few common extras.
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",
   lt: "<",

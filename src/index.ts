@@ -79,6 +79,7 @@ export {
   type MarketHistory,
   type MarketHistoryEvent,
   type MarketHistoryEventType,
+  type MarketHistoryRow,
   type MarketListingEvent,
   type MarketPurchase,
   type MarketSale,

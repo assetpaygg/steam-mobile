@@ -101,7 +101,7 @@ export interface WebTradeEligibility {
 
 // /market/mylistings (norender=1) listing. price = what the seller receives, fee = Steam + publisher
 // cut (the buyer pays price + fee); integer cents in the wallet currency. listings_to_confirm entries
-// (awaiting mobile confirmation) share this shape.
+// (awaiting mobile confirmation) carry the same listingid/asset fields.
 export interface RawMarketListing {
   listingid: string;
   price: number;

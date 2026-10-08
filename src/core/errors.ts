@@ -72,11 +72,14 @@ export class RateLimitError extends SteamError {
   }
 }
 
-// Steam's 403 throttle wall on /market/orderbook (only that endpoint): it persists, so retrying right
-// away is pointless — back off this account until unlockAt.
-export class ThrottledError extends RateLimitError {
-  constructor(options: { message?: string; body?: unknown; retryAfterMs?: number } = {}) {
-    super({ message: "Throttled (403)", ...options, statusCode: 403 });
+// Steam's 403 throttle wall on /market/orderbook (only that endpoint). Deliberately not a
+// RateLimitError: it persists and isn't cured by retrying or switching proxy — stop using the
+// account for a while.
+export class ThrottledError extends SteamError {
+  readonly statusCode = 403;
+
+  constructor(message = "Throttled (403)", options?: { body?: unknown }) {
+    super(message, options);
     this.name = "ThrottledError";
   }
 }

@@ -134,7 +134,7 @@ export class MarketNamespace {
       const page = body.listings ?? body.results?.listings ?? [];
       result.listings.push(...page);
       start += page.length;
-      // Stop at the reported total, or on an empty page (a stuck cursor would loop forever).
+      // Stop at the reported total, or on an empty page (an over-reported total).
       if (start >= result.num_active_listings || page.length === 0) return result;
     }
   }
@@ -173,7 +173,7 @@ export class MarketNamespace {
       `${URLS.community}/market/orderbook?q=Load&qp=${qp}`,
       { responseType: "json" },
     );
-    if (res.statusCode === 403) throw new ThrottledError({ body: res.body });
+    if (res.statusCode === 403) throw new ThrottledError(undefined, { body: res.body });
     if (res.statusCode !== 200) throw httpError(res);
 
     const body = res.body;
@@ -206,7 +206,8 @@ export class MarketNamespace {
         body: res.body,
       });
     }
-    return res.body.prices ?? [];
+    // Items without sales history may carry a non-array `prices`.
+    return Array.isArray(res.body.prices) ? res.body.prices : [];
   }
 
   // The market-search row whose hash_name matches exactly (sell_listings = listing count,
@@ -252,7 +253,7 @@ export class MarketNamespace {
     if (res.statusCode === 200 && (body?.success === true || body?.success === EResult.OK)) {
       return body;
     }
-    if (res.statusCode === 429) throw httpError(res);
+    if (res.statusCode === 429 || res.statusCode === 401) throw httpError(res);
     // Steam often answers a refusal with a non-200; classify its message first.
     if (body?.message) throw sellItemError(body.message, body);
     if (res.statusCode !== 200) throw httpError(res);
@@ -266,17 +267,18 @@ export class MarketNamespace {
       form: { sessionid },
       headers: { Referer: MARKET_REFERER },
     });
-    // 200, or a 302 back to the market, is success; a 302 to /login is an expired session.
-    const location = String(res.headers.location ?? "");
-    if (res.statusCode === 200 || (res.statusCode === 302 && !location.includes("/login"))) return;
+    // 200, or a 302 back to /market/, is success. Any other redirect (login, eligibility check)
+    // means nothing was removed.
+    if (res.statusCode === 200 || (res.statusCode === 302 && redirectsToMarket(res))) return;
     throw httpError(res);
   }
 
   // Steam's 3-step flow: createbuyorder(confirmation=0) → HTTP 406 + confirmation_id → accept that
   // mobile confirmation → createbuyorder again with confirmation=<id>. Trusted sessions succeed in
   // step 1. No retries by design: confirmation_id carries between steps, so retrying one step risks
-  // orphaned confirmations or duplicate orders — re-run the whole flow. Resolves with the
-  // buy_orderid; a refusal is a SteamError carrying Steam's code (body.success) as eresult.
+  // orphaned confirmations or duplicate orders — re-run the whole flow. A failure after the
+  // confirmation was accepted (step 3) may still have placed the order: check getMyListings first.
+  // Resolves with the buy_orderid; a refusal is a SteamError carrying Steam's code (body.success).
   async createBuyOrder(options: CreateBuyOrderOptions): Promise<string> {
     await this.session.getAccessToken();
     const sessionid = await this.http.getSessionId();
@@ -334,6 +336,7 @@ export class MarketNamespace {
     const total = Object.values(expected).reduce((sum, n) => sum + n, 0);
     if (total === 0) return { confirmed: [], skipped: [] };
 
+    await this.session.getAccessToken();
     const pending = await this.confirmations.getPending();
     const listings = pending
       .filter((c) => c.type === EConfirmationType.MarketListing)
@@ -346,7 +349,9 @@ export class MarketNamespace {
       const name =
         (remaining[conf.sending] ?? 0) > 0
           ? conf.sending
-          : Object.keys(remaining).find((n) => (remaining[n] ?? 0) > 0 && n.includes(conf.sending));
+          : Object.keys(remaining).find(
+              (n) => (remaining[n] ?? 0) > 0 && conf.sending !== "" && n.includes(conf.sending),
+            );
       if (name === undefined) {
         skipped.push(conf);
         continue;
@@ -364,6 +369,7 @@ export class MarketNamespace {
   async rejectListings(
     types: EConfirmationType[] = [EConfirmationType.MarketListing],
   ): Promise<Confirmation[]> {
+    await this.session.getAccessToken();
     const pending = await this.confirmations.getPending();
     const matched = pending.filter((c) => types.includes(c.type));
     await this.confirmations.rejectConfirmations(matched);
@@ -379,9 +385,16 @@ export class MarketNamespace {
       `${URLS.community}/market/createbuyorder/`,
       { responseType: "json", form, headers: { Referer: referer } },
     );
-    if (res.statusCode === 429) throw httpError(res);
+    if (res.statusCode === 429 || res.statusCode === 401) throw httpError(res);
     return res;
   }
+}
+
+function redirectsToMarket(res: HttpResponse<unknown>): boolean {
+  const location = res.headers.location;
+  if (typeof location !== "string" || !URL.canParse(location, URLS.community)) return false;
+  const { pathname } = new URL(location, URLS.community);
+  return pathname === "/market/" || pathname === "/market";
 }
 
 function eresultOf(body: { success?: boolean | number } | undefined): { eresult?: number } {

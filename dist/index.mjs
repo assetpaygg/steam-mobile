@@ -307,13 +307,10 @@ var RateLimitError = class extends SteamError {
 		this.unlockAt = Date.now() + this.retryAfterMs;
 	}
 };
-var ThrottledError = class extends RateLimitError {
-	constructor(options = {}) {
-		super({
-			message: "Throttled (403)",
-			...options,
-			statusCode: 403
-		});
+var ThrottledError = class extends SteamError {
+	statusCode = 403;
+	constructor(message = "Throttled (403)", options) {
+		super(message, options);
 		this.name = "ThrottledError";
 	}
 };
@@ -1943,6 +1940,7 @@ function getPriceValueAsInt(strAmount) {
 //#region src/market/history.ts
 function parseMarketHistory(body) {
 	const history = {
+		events: [],
 		sales: [],
 		purchases: [],
 		listingEvents: [],
@@ -1966,9 +1964,10 @@ function parseMarketHistory(body) {
 		const type = gainOrLoss === "-" ? "sale" : gainOrLoss === "+" ? "purchase" : "listing_event";
 		const idMatch = rowId.match(/^history_row_(\d+)_(\d+)$/);
 		if (!idMatch) continue;
-		const listingid = idMatch[1];
-		const eventid = idMatch[2];
 		const event = {
+			historyId: rowId,
+			listingid: idMatch[1],
+			eventid: idMatch[2],
 			itemName,
 			gameName,
 			listedOn,
@@ -1986,24 +1985,30 @@ function parseMarketHistory(body) {
 			unOwnedID: null
 		};
 		if (type !== "listing_event") attachAsset(event, rowId, hovers, assets);
-		if (type === "sale") history.sales.push({
-			historyId: rowId,
-			listingid,
-			receivedAmount: priceInCents,
-			...event
-		});
-		else if (type === "purchase") history.purchases.push({
-			historyId: rowId,
-			listingid,
-			paidAmount: priceInCents,
-			...event
-		});
-		else history.listingEvents.push({
-			historyId: rowId,
-			listingid,
-			eventid,
-			...event
-		});
+		if (type === "sale") {
+			const sale = {
+				...event,
+				type,
+				receivedAmount: priceInCents
+			};
+			history.sales.push(sale);
+			history.events.push(sale);
+		} else if (type === "purchase") {
+			const purchase = {
+				...event,
+				type,
+				paidAmount: priceInCents
+			};
+			history.purchases.push(purchase);
+			history.events.push(purchase);
+		} else {
+			const listingEvent = {
+				...event,
+				type
+			};
+			history.listingEvents.push(listingEvent);
+			history.events.push(listingEvent);
+		}
 	}
 	return history;
 }
@@ -2065,10 +2070,9 @@ function closeIndex(html, tag, from) {
 	} else if (!(m[2] ?? "").trimEnd().endsWith("/")) depth++;
 	return html.length;
 }
+const ATTR = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 function attrValue(attrs, name) {
-	const m = attrs.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i"));
-	const raw = m?.[1] ?? m?.[2] ?? m?.[3];
-	return raw === void 0 ? void 0 : decodeEntities(raw);
+	for (const m of attrs.matchAll(ATTR)) if (m[1].toLowerCase() === name) return decodeEntities(m[2] ?? m[3] ?? m[4] ?? "");
 }
 function textOf(html, className) {
 	return findByClass(html, className).map(elementText).join("");
@@ -2171,7 +2175,7 @@ var MarketNamespace = class {
 		await this.session.getAccessToken();
 		const qp = encodeURIComponent(JSON.stringify([appid, marketHashName]));
 		const res = await this.http.get(`${URLS.community}/market/orderbook?q=Load&qp=${qp}`, { responseType: "json" });
-		if (res.statusCode === 403) throw new ThrottledError({ body: res.body });
+		if (res.statusCode === 403) throw new ThrottledError(void 0, { body: res.body });
 		if (res.statusCode !== 200) throw httpError(res);
 		const body = res.body;
 		const payload = body && body.success === void 0 && body.data ? body.data : body;
@@ -2185,7 +2189,7 @@ var MarketNamespace = class {
 		const res = await this.http.get(`${URLS.community}/market/pricehistory?appid=${appid}&market_hash_name=${encodeURIComponent(marketHashName)}`, { responseType: "json" });
 		if (res.statusCode !== 200) throw httpError(res);
 		if (!res.body?.success) throw new SteamError(`Steam returned success=false for pricehistory of ${marketHashName}`, { body: res.body });
-		return res.body.prices ?? [];
+		return Array.isArray(res.body.prices) ? res.body.prices : [];
 	}
 	async getMarketItemDetails(appid, marketHashName) {
 		await this.session.getAccessToken();
@@ -2213,7 +2217,7 @@ var MarketNamespace = class {
 		});
 		const body = res.body;
 		if (res.statusCode === 200 && (body?.success === true || body?.success === 1)) return body;
-		if (res.statusCode === 429) throw httpError(res);
+		if (res.statusCode === 429 || res.statusCode === 401) throw httpError(res);
 		if (body?.message) throw sellItemError(body.message, body);
 		if (res.statusCode !== 200) throw httpError(res);
 		throw new SteamError("Unknown error listing item", {
@@ -2228,8 +2232,7 @@ var MarketNamespace = class {
 			form: { sessionid },
 			headers: { Referer: MARKET_REFERER }
 		});
-		const location = String(res.headers.location ?? "");
-		if (res.statusCode === 200 || res.statusCode === 302 && !location.includes("/login")) return;
+		if (res.statusCode === 200 || res.statusCode === 302 && redirectsToMarket(res)) return;
 		throw httpError(res);
 	}
 	async createBuyOrder(options) {
@@ -2278,12 +2281,13 @@ var MarketNamespace = class {
 			confirmed: [],
 			skipped: []
 		};
+		await this.session.getAccessToken();
 		const listings = (await this.confirmations.getPending()).filter((c) => c.type === 3).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 		const remaining = { ...expected };
 		const confirmed = [];
 		const skipped = [];
 		for (const conf of listings) {
-			const name = (remaining[conf.sending] ?? 0) > 0 ? conf.sending : Object.keys(remaining).find((n) => (remaining[n] ?? 0) > 0 && n.includes(conf.sending));
+			const name = (remaining[conf.sending] ?? 0) > 0 ? conf.sending : Object.keys(remaining).find((n) => (remaining[n] ?? 0) > 0 && conf.sending !== "" && n.includes(conf.sending));
 			if (name === void 0) {
 				skipped.push(conf);
 				continue;
@@ -2298,6 +2302,7 @@ var MarketNamespace = class {
 		};
 	}
 	async rejectListings(types = [3]) {
+		await this.session.getAccessToken();
 		const matched = (await this.confirmations.getPending()).filter((c) => types.includes(c.type));
 		await this.confirmations.rejectConfirmations(matched);
 		return matched;
@@ -2308,10 +2313,16 @@ var MarketNamespace = class {
 			form,
 			headers: { Referer: referer }
 		});
-		if (res.statusCode === 429) throw httpError(res);
+		if (res.statusCode === 429 || res.statusCode === 401) throw httpError(res);
 		return res;
 	}
 };
+function redirectsToMarket(res) {
+	const location = res.headers.location;
+	if (typeof location !== "string" || !URL.canParse(location, URLS.community)) return false;
+	const { pathname } = new URL(location, URLS.community);
+	return pathname === "/market/" || pathname === "/market";
+}
 function eresultOf(body) {
 	const success = body?.success;
 	return typeof success === "number" && success !== 1 ? { eresult: success } : {};

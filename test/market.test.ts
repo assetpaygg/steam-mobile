@@ -53,6 +53,7 @@ class FakeConfirmations {
   accepted: Pick<Confirmation, "id" | "key">[][] = [];
   rejected: Pick<Confirmation, "id" | "key">[][] = [];
   acceptedObjects: string[] = [];
+  objectError: Error | undefined;
 
   async getPending() {
     return this.pending;
@@ -64,6 +65,7 @@ class FakeConfirmations {
     this.rejected.push(confs);
   }
   async acceptConfirmationForObject(id: string) {
+    if (this.objectError) throw this.objectError;
     this.acceptedObjects.push(id);
   }
 }
@@ -196,6 +198,7 @@ describe("parseMarketHistory", () => {
       {
         historyId: "history_row_1001_1002",
         listingid: "1001",
+        eventid: "1002",
         receivedAmount: 225,
         itemName: "Road Raider Bandana",
         gameName: "Rust",
@@ -232,6 +235,41 @@ describe("parseMarketHistory", () => {
     expect(e.listedOn).toBe("");
     expect(e.appID).toBeNull();
     expect(e.marketName).toBeNull();
+  });
+
+  it("keeps every row in page order in events (the sales/purchases interleaving)", () => {
+    const h = parseMarketHistory(HISTORY_BODY);
+    expect(h.events.map((e) => [e.type, e.eventid])).toEqual([
+      ["sale", "1002"],
+      ["purchase", "2002"],
+      ["listing_event", "3002"],
+    ]);
+    expect(h.events[0]).toBe(h.sales[0]);
+  });
+
+  it("reads attributes by position: no space before id, id= inside another attribute value", () => {
+    const html = SALE_ROW.replace(
+      '<div class="market_listing_row market_recent_listing_row" id="history_row_1001_1002">',
+      '<div title="x id=history_row_9_9" class="market_listing_row market_recent_listing_row"id="history_row_1001_1002">',
+    );
+    const h = parseMarketHistory({ ...HISTORY_BODY, results_html: html });
+    expect(h.sales.map((s) => s.historyId)).toEqual(["history_row_1001_1002"]);
+    expect(h.sales[0]!.marketName).toBe("Road Raider Bandana");
+  });
+
+  it("skips rows without a history_row id and survives a malformed hover", () => {
+    const noId = SALE_ROW.replace('id="history_row_1001_1002"', 'id="history_row_bad"');
+    const h1 = parseMarketHistory({ ...HISTORY_BODY, results_html: noId });
+    expect(h1.events).toEqual([]);
+
+    const h2 = parseMarketHistory({
+      ...HISTORY_BODY,
+      results_html: SALE_ROW,
+      hovers: "CreateItemHoverFromContainer( g_rgAssets, 'history_row_1001_1002_name', 252490 );",
+    });
+    expect(h2.sales[0]!.appID).toBe(252490);
+    expect(h2.sales[0]!.assetID).toBeNull();
+    expect(h2.sales[0]!.marketName).toBeNull();
   });
 
   it("fails loud when a real price string parses to 0 cents", () => {
@@ -371,13 +409,14 @@ describe("MarketNamespace.getOrderbook", () => {
     );
   });
 
-  it("classifies the 403 throttle wall as ThrottledError (a RateLimitError)", async () => {
+  it("classifies the 403 throttle wall as ThrottledError (not a RateLimitError) and 429 as RateLimitError", async () => {
     const { market, http } = makeMarket();
-    http.reply({ statusCode: 403 });
+    http.reply({ statusCode: 403 }, { statusCode: 429 });
     const err = await market.getOrderbook(730, "X").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ThrottledError);
-    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err).not.toBeInstanceOf(RateLimitError);
     expect((err as ThrottledError).statusCode).toBe(403);
+    await expect(market.getOrderbook(730, "X")).rejects.toBeInstanceOf(RateLimitError);
   });
 });
 
@@ -390,6 +429,12 @@ describe("MarketNamespace.getPriceHistory / getMarketItemDetails", () => {
     expect(http.requests[0]!.url).toBe(
       "https://steamcommunity.com/market/pricehistory?appid=730&market_hash_name=AK-47%20%7C%20Redline%20(Field-Tested)",
     );
+  });
+
+  it("returns [] when an item without sales history has no prices array", async () => {
+    const { market, http } = makeMarket();
+    http.reply({ body: { success: true, prices: false } });
+    expect(await market.getPriceHistory(730, "X")).toEqual([]);
   });
 
   it("throws when pricehistory reports success=false", async () => {
@@ -458,6 +503,14 @@ describe("MarketNamespace.sellItem", () => {
     expect(err.message).toBe("Something else");
   });
 
+  it("classifies 401 as an expired session even when Steam sends a message", async () => {
+    const { market, http } = makeMarket();
+    http.reply({ statusCode: 401, body: { success: false, message: "Not logged in" } });
+    await expect(market.sellItem({ appid: 730, assetid: "1", price: 1 })).rejects.toBeInstanceOf(
+      SteamSessionExpiredError,
+    );
+  });
+
   it("classifies 429 and a bodiless failure by HTTP status", async () => {
     const { market, http } = makeMarket();
     http.reply({ statusCode: 429 }, { statusCode: 500 });
@@ -490,6 +543,19 @@ describe("MarketNamespace.cancelListing", () => {
       { statusCode: 500 },
     );
     await expect(market.cancelListing("1")).rejects.toBeInstanceOf(SteamSessionExpiredError);
+    await expect(market.cancelListing("1")).rejects.toBeInstanceOf(HttpStatusError);
+  });
+
+  it("never treats a redirect elsewhere (eligibility check, no Location) as removed", async () => {
+    const { market, http } = makeMarket();
+    http.reply(
+      {
+        statusCode: 302,
+        headers: { location: "https://steamcommunity.com/market/eligibilitycheck/?goto=%2F" },
+      },
+      { statusCode: 302 },
+    );
+    await expect(market.cancelListing("1")).rejects.toThrow(/eligibility/);
     await expect(market.cancelListing("1")).rejects.toBeInstanceOf(HttpStatusError);
   });
 });
@@ -565,6 +631,24 @@ describe("MarketNamespace.createBuyOrder", () => {
     await expect(market.createBuyOrder(ORDER)).rejects.toBeInstanceOf(RateLimitError);
     await expect(market.createBuyOrder(ORDER)).rejects.toBeInstanceOf(HttpStatusError);
   });
+
+  it("surfaces a 429 on the finalize step (after the confirmation was accepted)", async () => {
+    const { market, http, confirmations } = makeMarket();
+    http.reply(
+      { statusCode: 406, body: { confirmation: { confirmation_id: "7" } } },
+      { statusCode: 429 },
+    );
+    await expect(market.createBuyOrder(ORDER)).rejects.toBeInstanceOf(RateLimitError);
+    expect(confirmations.acceptedObjects).toEqual(["7"]);
+  });
+
+  it("does not finalize when the mobile confirmation fails", async () => {
+    const { market, http, confirmations } = makeMarket();
+    confirmations.objectError = new Error("Could not find confirmation for object 7");
+    http.reply({ statusCode: 406, body: { confirmation: { confirmation_id: "7" } } });
+    await expect(market.createBuyOrder(ORDER)).rejects.toThrow(/Could not find confirmation/);
+    expect(http.requests).toHaveLength(1);
+  });
 });
 
 describe("MarketNamespace.cancelBuyOrder / getWalletDetails", () => {
@@ -576,13 +660,21 @@ describe("MarketNamespace.cancelBuyOrder / getWalletDetails", () => {
     expect(http.requests[0]!.opts.form).toEqual({ sessionid: "sess", buy_orderid: "555" });
   });
 
+  it("throws on a non-200 cancel", async () => {
+    const { market, http } = makeMarket();
+    http.reply({ statusCode: 500 });
+    await expect(market.cancelBuyOrder("555")).rejects.toBeInstanceOf(HttpStatusError);
+  });
+
   it("reads the wallet via IUserAccountService/GetClientWalletDetails", async () => {
     const response = { has_wallet: true, balance: "12345", currency_code: 3 };
     const { market, apiCalls } = makeMarket({ response });
     expect(await market.getWalletDetails()).toEqual(response);
-    expect(apiCalls[0]).toMatchObject({
+    expect(apiCalls[0]).toEqual({
+      httpMethod: "GET",
       iface: "IUserAccountService",
       method: "GetClientWalletDetails",
+      input: { include_balance_in_usd: 1, include_formatted_balance: 1 },
     });
   });
 
@@ -611,6 +703,17 @@ describe("MarketNamespace confirmations", () => {
     expect(r.confirmed.map((c) => c.id)).toEqual(["1", "3"]);
     expect(r.skipped.map((c) => c.id)).toEqual(["2", "4"]);
     expect(confirmations.accepted).toEqual([r.confirmed]);
+  });
+
+  it("confirmListings never substring-matches an empty confirmation summary", async () => {
+    const { market, confirmations } = makeMarket();
+    confirmations.pending = [
+      conf("1", EConfirmationType.MarketListing, "", 100),
+      conf("2", EConfirmationType.MarketListing, "AK-47 | Redline", 200),
+    ];
+    const r = await market.confirmListings({ "AK-47 | Redline (Field-Tested)": 1 });
+    expect(r.confirmed.map((c) => c.id)).toEqual(["2"]);
+    expect(r.skipped.map((c) => c.id)).toEqual(["1"]);
   });
 
   it("confirmListings is a no-op when nothing is expected", async () => {
