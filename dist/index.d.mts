@@ -465,7 +465,8 @@ declare enum EConfirmationType {
   MarketListing = 3,
   FeatureOptOut = 4,
   PhoneNumberChange = 5,
-  AccountRecovery = 6
+  AccountRecovery = 6,
+  BuyOrder = 12
 }
 declare enum EOfferFilter {
   ActiveOnly = 1,
@@ -977,13 +978,15 @@ declare class ConfirmationManager {
   get hasIdentitySecret(): boolean;
   private deviceId;
   getConfirmations(time: number, key: ConfKey): Promise<Confirmation[]>;
-  respondToConfirmation(confID: string, confKey: string, time: number, key: ConfKey, accept: boolean): Promise<void>;
+  respondToConfirmation(confID: string | string[], confKey: string | string[], time: number, key: ConfKey, accept: boolean): Promise<void>;
   getPending(): Promise<Confirmation[]>;
   acceptConfirmation(confID: string, nonce: string): Promise<void>;
   rejectConfirmation(confID: string, nonce: string): Promise<void>;
+  acceptConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void>;
+  rejectConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void>;
   acceptAll(): Promise<Confirmation[]>;
   acceptConfirmationForObject(objectID: string): Promise<void>;
-  private actOnConfirmation;
+  private actOnConfirmations;
   private requireSecret;
   private nextConfTime;
   private getTimeOffset;

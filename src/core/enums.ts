@@ -45,6 +45,8 @@ export enum EConfirmationType {
   FeatureOptOut = 4,
   PhoneNumberChange = 5,
   AccountRecovery = 6,
+  // Market buy order (createbuyorder) — distinct from MarketListing (sell).
+  BuyOrder = 12,
 }
 
 export enum EOfferFilter {

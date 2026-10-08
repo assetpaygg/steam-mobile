@@ -68,6 +68,7 @@ let EConfirmationType = /* @__PURE__ */ function(EConfirmationType) {
 	EConfirmationType[EConfirmationType["FeatureOptOut"] = 4] = "FeatureOptOut";
 	EConfirmationType[EConfirmationType["PhoneNumberChange"] = 5] = "PhoneNumberChange";
 	EConfirmationType[EConfirmationType["AccountRecovery"] = 6] = "AccountRecovery";
+	EConfirmationType[EConfirmationType["BuyOrder"] = 12] = "BuyOrder";
 	return EConfirmationType;
 }({});
 let EOfferFilter = /* @__PURE__ */ function(EOfferFilter) {
@@ -1623,6 +1624,9 @@ var ConfirmationManager = class {
 		}));
 	}
 	async respondToConfirmation(confID, confKey, time, key, accept) {
+		const ids = Array.isArray(confID) ? confID : [confID];
+		const keys = Array.isArray(confKey) ? confKey : [confKey];
+		if (ids.length !== keys.length) throw new ConfirmationError("confID and confKey must have the same length");
 		const { tag, k } = splitKey(key, accept ? "allow" : "cancel");
 		const op = accept ? "allow" : "cancel";
 		const res = await this.http.post(`${URLS.community}/mobileconf/multiajaxop`, {
@@ -1631,13 +1635,13 @@ var ConfirmationManager = class {
 				...this.confParams(k, time, tag),
 				op
 			},
-			multipart: [{
+			multipart: ids.flatMap((id, i) => [{
 				name: "cid[]",
-				value: confID
+				value: id
 			}, {
 				name: "ck[]",
-				value: confKey
-			}]
+				value: keys[i]
+			}])
 		});
 		if (res.statusCode !== 200) throw httpError(res);
 		if (res.body?.success) return;
@@ -1653,10 +1657,22 @@ var ConfirmationManager = class {
 		});
 	}
 	acceptConfirmation(confID, nonce) {
-		return this.actOnConfirmation(confID, nonce, true);
+		return this.actOnConfirmations([{
+			id: confID,
+			key: nonce
+		}], true);
 	}
 	rejectConfirmation(confID, nonce) {
-		return this.actOnConfirmation(confID, nonce, false);
+		return this.actOnConfirmations([{
+			id: confID,
+			key: nonce
+		}], false);
+	}
+	acceptConfirmations(confs) {
+		return this.actOnConfirmations(confs, true);
+	}
+	rejectConfirmations(confs) {
+		return this.actOnConfirmations(confs, false);
 	}
 	async acceptAll() {
 		const pending = await this.getPending();
@@ -1668,13 +1684,14 @@ var ConfirmationManager = class {
 		if (!conf) throw new ConfirmationError(`Could not find confirmation for object ${objectID}`);
 		await this.acceptConfirmation(conf.id, conf.key);
 	}
-	async actOnConfirmation(confID, nonce, accept) {
+	async actOnConfirmations(confs, accept) {
+		if (confs.length === 0) return;
 		const secret = this.requireSecret();
 		const offset = await this.getTimeOffset();
 		const time = this.nextConfTime(offset);
 		const tag = accept ? "accept" : "cancel";
 		const key = getConfirmationKey(secret, time, tag);
-		await this.respondToConfirmation(confID, nonce, time, {
+		await this.respondToConfirmation(confs.map((c) => c.id), confs.map((c) => c.key), time, {
 			tag,
 			key
 		}, accept);

@@ -97,13 +97,19 @@ export class ConfirmationManager {
     }));
   }
 
+  // confID/confKey may be parallel arrays (steamcommunity's multi form): one request, one HMAC.
   async respondToConfirmation(
-    confID: string,
-    confKey: string,
+    confID: string | string[],
+    confKey: string | string[],
     time: number,
     key: ConfKey,
     accept: boolean,
   ): Promise<void> {
+    const ids = Array.isArray(confID) ? confID : [confID];
+    const keys = Array.isArray(confKey) ? confKey : [confKey];
+    if (ids.length !== keys.length) {
+      throw new ConfirmationError("confID and confKey must have the same length");
+    }
     const { tag, k } = splitKey(key, accept ? "allow" : "cancel");
     const op = accept ? "allow" : "cancel";
     // multiajaxop: ids go in the multipart body (cid[]/ck[]), op/signature stay in the query string.
@@ -112,10 +118,10 @@ export class ConfirmationManager {
       {
         responseType: "json",
         searchParams: { ...this.confParams(k, time, tag), op },
-        multipart: [
-          { name: "cid[]", value: confID },
-          { name: "ck[]", value: confKey },
-        ],
+        multipart: ids.flatMap((id, i) => [
+          { name: "cid[]", value: id },
+          { name: "ck[]", value: keys[i]! },
+        ]),
       },
     );
     if (res.statusCode !== 200) throw httpError(res);
@@ -134,12 +140,21 @@ export class ConfirmationManager {
 
   // Accept a single confirmation by id + nonce (its `key`).
   acceptConfirmation(confID: string, nonce: string): Promise<void> {
-    return this.actOnConfirmation(confID, nonce, true);
+    return this.actOnConfirmations([{ id: confID, key: nonce }], true);
   }
 
   // Reject (cancel) a single confirmation by id + nonce.
   rejectConfirmation(confID: string, nonce: string): Promise<void> {
-    return this.actOnConfirmation(confID, nonce, false);
+    return this.actOnConfirmations([{ id: confID, key: nonce }], false);
+  }
+
+  // Accept / reject a caller-selected set in one multiajaxop request. No-op when empty.
+  acceptConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void> {
+    return this.actOnConfirmations(confs, true);
+  }
+
+  rejectConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void> {
+    return this.actOnConfirmations(confs, false);
   }
 
   // Accept every pending confirmation; returns the ones acted on. Fails fast on the first error.
@@ -155,13 +170,23 @@ export class ConfirmationManager {
     await this.acceptConfirmation(conf.id, conf.key);
   }
 
-  private async actOnConfirmation(confID: string, nonce: string, accept: boolean): Promise<void> {
+  private async actOnConfirmations(
+    confs: Pick<Confirmation, "id" | "key">[],
+    accept: boolean,
+  ): Promise<void> {
+    if (confs.length === 0) return;
     const secret = this.requireSecret();
     const offset = await this.getTimeOffset();
     const time = this.nextConfTime(offset);
     const tag = accept ? "accept" : "cancel";
     const key = SteamTotp.getConfirmationKey(secret, time, tag);
-    await this.respondToConfirmation(confID, nonce, time, { tag, key }, accept);
+    await this.respondToConfirmation(
+      confs.map((c) => c.id),
+      confs.map((c) => c.key),
+      time,
+      { tag, key },
+      accept,
+    );
   }
 
   private requireSecret(): string {

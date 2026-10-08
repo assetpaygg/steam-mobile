@@ -153,6 +153,42 @@ describe("ConfirmationManager.respondToConfirmation", () => {
     ]);
   });
 
+  it("sends parallel id/key arrays as ordered cid[]/ck[] pairs in one request", async () => {
+    const http = new FakeHttp();
+    http.setBody({ success: true });
+    const mgr = new ConfirmationManager(
+      http as unknown as HttpClient,
+      STEAM_ID,
+      "secret",
+      IOS_PROFILE,
+    );
+
+    await mgr.respondToConfirmation(["1", "2"], ["n1", "n2"], 123, "kk", false);
+
+    expect(http.posts).toHaveLength(1);
+    expect(http.posts[0]!.searchParams!.op).toBe("cancel");
+    expect(http.posts[0]!.multipart).toEqual([
+      { name: "cid[]", value: "1" },
+      { name: "ck[]", value: "n1" },
+      { name: "cid[]", value: "2" },
+      { name: "ck[]", value: "n2" },
+    ]);
+  });
+
+  it("rejects mismatched id/key arrays without a request", async () => {
+    const http = new FakeHttp();
+    const mgr = new ConfirmationManager(
+      http as unknown as HttpClient,
+      STEAM_ID,
+      "secret",
+      IOS_PROFILE,
+    );
+    await expect(mgr.respondToConfirmation(["1", "2"], ["n1"], 1, "kk", true)).rejects.toThrow(
+      ConfirmationError,
+    );
+    expect(http.posts).toHaveLength(0);
+  });
+
   it("throws ConfirmationError when the action fails", async () => {
     const http = new FakeHttp();
     http.setBody({ success: false, message: "nope" });
@@ -245,6 +281,31 @@ describe("ConfirmationManager high-level helpers", () => {
   it("rejectConfirmation responds with tag=cancel and op=cancel", async () => {
     const { http, mgr } = mgrWith(combined([]));
     await mgr.rejectConfirmation("9", "k9");
+    const post = multiajaxop(http)[0]!;
+    expect(post.searchParams!.op).toBe("cancel");
+    expect(post.searchParams!.tag).toBe("cancel");
+  });
+
+  it("acceptConfirmations batches the selected set into one multiajaxop", async () => {
+    const { http, mgr } = mgrWith(combined([]));
+    await mgr.acceptConfirmations([
+      { id: "1", key: "na" },
+      { id: "2", key: "nb" },
+    ]);
+    const ops = multiajaxop(http);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]!.searchParams!.op).toBe("allow");
+    expect(ops[0]!.searchParams!.tag).toBe("accept");
+    expect(ops[0]!.multipart!.map((p) => p.value)).toEqual(["1", "na", "2", "nb"]);
+  });
+
+  it("rejectConfirmations uses tag=cancel; an empty set makes no requests", async () => {
+    const { http, mgr } = mgrWith(combined([]));
+    await mgr.rejectConfirmations([]);
+    expect(http.calls).toHaveLength(0);
+    expect(http.posts).toHaveLength(0);
+
+    await mgr.rejectConfirmations([{ id: "9", key: "k9" }]);
     const post = multiajaxop(http)[0]!;
     expect(post.searchParams!.op).toBe("cancel");
     expect(post.searchParams!.tag).toBe("cancel");
