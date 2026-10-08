@@ -87,14 +87,15 @@ export interface RawGetTradeStatusResponse {
 
 // Verdict from /market/eligibilitycheck/, decoded from the `webTradeEligibility` cookie it sets.
 // allowed: 1 = can trade now, 0 = blocked. reason is a bitmask; the *_days/*_at_time fields detail
-// the active Steam Guard / new-device holds. All times are unix seconds.
+// the active Steam Guard / new-device holds. All times are unix seconds. An allowed account's
+// cookie carries no reason / expiration.
 export interface WebTradeEligibility {
   allowed: number;
-  reason: number;
+  reason?: number;
   allowed_at_time: number;
   steamguard_required_days: number;
   new_device_cooldown_days: number;
-  expiration: number;
+  expiration?: number;
   time_checked: number;
   [key: string]: unknown;
 }
@@ -238,29 +239,6 @@ export interface RawWalletDetails {
   [key: string]: unknown;
 }
 
-// ICredentialsService/GetSteamGuardDetails (CCredentials_GetSteamGuardDetails_Response). Times are unix
-// seconds; 64-bit ids arrive as strings.
-export interface RawSteamGuardDetails {
-  is_steamguard_enabled?: boolean;
-  timestamp_steamguard_enabled?: number;
-  session_data?: RawSteamGuardSessionData[];
-  is_twofactor_enabled?: boolean;
-  timestamp_twofactor_enabled?: number;
-  is_phone_verified?: boolean;
-  [key: string]: unknown;
-}
-
-export interface RawSteamGuardSessionData {
-  machine_id?: string;
-  machine_name_userchosen?: string;
-  timestamp_machine_steamguard_enabled?: number;
-  authentication_exists_from_geoloc_before_mintime?: boolean;
-  authentication_exists_from_same_ip_before_mintime?: boolean;
-  public_ipv4?: number;
-  public_ip_address?: string;
-  [key: string]: unknown;
-}
-
 // ITwoFactorService/QueryStatus (CTwoFactor_Status_Response).
 export interface RawTwoFactorStatus {
   state?: number;
@@ -277,5 +255,6 @@ export interface RawTwoFactorStatus {
   allow_external_authenticator?: boolean;
   time_transferred?: number;
   version?: number;
+  last_seen_auth_token_id?: string;
   [key: string]: unknown;
 }

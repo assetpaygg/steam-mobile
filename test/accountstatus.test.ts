@@ -26,31 +26,6 @@ function makeCommunity(apiBody: unknown) {
   return { community, calls };
 }
 
-describe("CommunityNamespace.getSteamGuardDetails", () => {
-  it("returns ICredentialsService/GetSteamGuardDetails as sent", async () => {
-    const response = {
-      is_steamguard_enabled: true,
-      timestamp_steamguard_enabled: 1600000000,
-      is_twofactor_enabled: true,
-      timestamp_twofactor_enabled: 1600000500,
-      is_phone_verified: false,
-      session_data: [{ timestamp_machine_steamguard_enabled: 1600001000 }],
-    };
-    const { community, calls } = makeCommunity({ response });
-    expect(await community.getSteamGuardDetails()).toEqual(response);
-    expect(calls[0]).toEqual({
-      httpMethod: "GET",
-      iface: "ICredentialsService",
-      method: "GetSteamGuardDetails",
-    });
-  });
-
-  it("throws on a body without a response", async () => {
-    const { community } = makeCommunity({});
-    await expect(community.getSteamGuardDetails()).rejects.toThrow(/Steam Guard/);
-  });
-});
-
 describe("CommunityNamespace.getTwoFactorStatus", () => {
   it("queries ITwoFactorService/QueryStatus for our steamid", async () => {
     const response = { state: 1, email_validated: true, time_created: 1600000000 };

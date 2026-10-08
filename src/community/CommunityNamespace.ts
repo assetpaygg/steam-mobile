@@ -3,11 +3,7 @@ import { SteamError } from "../core/errors.js";
 import { type Page, paginate } from "../core/paginate.js";
 import { parseStrError } from "../core/parseStrError.js";
 import { RETRY_AFTER } from "../core/rateLimits.js";
-import type {
-  RawSteamGuardDetails,
-  RawTwoFactorStatus,
-  WebTradeEligibility,
-} from "../core/types.js";
+import type { RawTwoFactorStatus, WebTradeEligibility } from "../core/types.js";
 import { checkCommunityError, httpError } from "../http/checkers.js";
 import type { HttpClient } from "../http/HttpClient.js";
 import { inventoryFailureError } from "../http/tradePageError.js";
@@ -157,19 +153,8 @@ export class CommunityNamespace {
     return res.response?.player_level ?? 0;
   }
 
-  // Steam Guard / 2FA / phone state with enable times (the data steam-user's getSteamGuardDetails
-  // derives canTrade from). Access-token WebAPI call.
-  async getSteamGuardDetails(): Promise<RawSteamGuardDetails> {
-    const body = await this.api.call<{ response?: RawSteamGuardDetails }>({
-      httpMethod: "GET",
-      iface: "ICredentialsService",
-      method: "GetSteamGuardDetails",
-    });
-    if (!body.response) throw new SteamError("Malformed Steam Guard details response", { body });
-    return body.response;
-  }
-
-  // Mobile-authenticator status as the app queries it (state, email_validated, …).
+  // Mobile-authenticator status as the app queries it: state, time_created (when 2FA was added),
+  // email_validated. (ICredentialsService/GetSteamGuardDetails isn't served over the WebAPI — 404.)
   async getTwoFactorStatus(): Promise<RawTwoFactorStatus> {
     const body = await this.api.call<{ response?: RawTwoFactorStatus }>({
       httpMethod: "POST",

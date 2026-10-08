@@ -684,19 +684,12 @@ state, VAC status, privacy state, and the `isLimited` flag. (Steam level isn't i
 Returns the account's Steam level as a `Promise<number>` via `IPlayerService/GetSteamLevel` (which
 accepts the access token — no API key required).
 
-### getSteamGuardDetails()
-
-Returns Steam Guard state via `ICredentialsService/GetSteamGuardDetails` as
-`Promise<RawSteamGuardDetails>`: `is_steamguard_enabled`, `is_twofactor_enabled`,
-`is_phone_verified`, their enable times (`timestamp_*`, unix seconds) and `session_data[]`
-(per-machine `timestamp_machine_steamguard_enabled`). For Steam's own can-trade verdict (holds
-included) use `getWebTradeEligibility()`.
-
 ### getTwoFactorStatus()
 
 Returns the mobile-authenticator status via `ITwoFactorService/QueryStatus` as
-`Promise<RawTwoFactorStatus>`: `state`, `email_validated`, `time_created`, and the rest of Steam's
-fields.
+`Promise<RawTwoFactorStatus>`: `state`, `email_validated`, `time_created` (when the authenticator was
+added), and the rest of Steam's fields. For Steam's can-trade verdict (Steam Guard / new-device holds
+included) use `getWebTradeEligibility()`.
 
 ### community.ensureApiKey(\[domain])
 

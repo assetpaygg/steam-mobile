@@ -84,10 +84,10 @@ export class MarketNamespace {
   ) {}
 
   // Wallet balance + currency (currency_code) — the WebAPI form of the client's
-  // UserAccount.GetClientWalletDetails call.
+  // UserAccount.GetClientWalletDetails call (POST-only: GET answers 405).
   async getWalletDetails(): Promise<RawWalletDetails> {
     const body = await this.api.call<{ response?: RawWalletDetails }>({
-      httpMethod: "GET",
+      httpMethod: "POST",
       iface: "IUserAccountService",
       method: "GetClientWalletDetails",
       input: { include_balance_in_usd: 1, include_formatted_balance: 1 },

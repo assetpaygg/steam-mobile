@@ -671,7 +671,7 @@ describe("MarketNamespace.cancelBuyOrder / getWalletDetails", () => {
     const { market, apiCalls } = makeMarket({ response });
     expect(await market.getWalletDetails()).toEqual(response);
     expect(apiCalls[0]).toEqual({
-      httpMethod: "GET",
+      httpMethod: "POST",
       iface: "IUserAccountService",
       method: "GetClientWalletDetails",
       input: { include_balance_in_usd: 1, include_formatted_balance: 1 },

@@ -31,18 +31,7 @@ async function main(): Promise<void> {
     ["market.getWalletDetails", () => bot.market.getWalletDetails()],
     ["community.getProfile", () => bot.community.getProfile()],
     ["community.getWebTradeEligibility", () => bot.community.getWebTradeEligibility()],
-    ["community.getSteamGuardDetails", () => bot.community.getSteamGuardDetails()],
     ["community.getTwoFactorStatus", () => bot.community.getTwoFactorStatus()],
-    [
-      "GetPlayerBans via access token (no key)",
-      () =>
-        bot.api.call({
-          httpMethod: "GET",
-          iface: "ISteamUser",
-          method: "GetPlayerBans",
-          input: { steamids: steamID },
-        }),
-    ],
     [
       "market.getMyListings",
       async () => {

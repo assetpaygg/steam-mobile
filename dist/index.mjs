@@ -1498,15 +1498,6 @@ var CommunityNamespace = class {
 			input: { steamid: id }
 		})).response?.player_level ?? 0;
 	}
-	async getSteamGuardDetails() {
-		const body = await this.api.call({
-			httpMethod: "GET",
-			iface: "ICredentialsService",
-			method: "GetSteamGuardDetails"
-		});
-		if (!body.response) throw new SteamError("Malformed Steam Guard details response", { body });
-		return body.response;
-	}
 	async getTwoFactorStatus() {
 		const body = await this.api.call({
 			httpMethod: "POST",
@@ -2134,7 +2125,7 @@ var MarketNamespace = class {
 	}
 	async getWalletDetails() {
 		const body = await this.api.call({
-			httpMethod: "GET",
+			httpMethod: "POST",
 			iface: "IUserAccountService",
 			method: "GetClientWalletDetails",
 			input: {
