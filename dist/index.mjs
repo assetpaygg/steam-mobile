@@ -358,6 +358,12 @@ var ConfirmationError = class extends SteamError {
 		this.name = "ConfirmationError";
 	}
 };
+var ConfirmationOutcomeUnknownError = class extends ConfirmationError {
+	constructor(message = "Confirmation response unreadable; the outcome is unknown") {
+		super(message);
+		this.name = "ConfirmationOutcomeUnknownError";
+	}
+};
 var FamilyViewError = class extends SteamError {
 	constructor(message = "Family View Restricted") {
 		super(message);
@@ -371,9 +377,59 @@ var PrivateInventoryError = class extends SteamError {
 	}
 };
 var MarketConfirmationLimitError = class extends SteamError {
+	reason;
 	constructor(message = "Too many listings pending confirmation", options) {
 		super(message, options);
 		this.name = "MarketConfirmationLimitError";
+		this.reason = options?.reason ?? "unknown";
+	}
+};
+var MarketItemUnavailableError = class extends SteamError {
+	constructor(message, options) {
+		super(message, options);
+		this.name = "MarketItemUnavailableError";
+	}
+};
+var MarketIneligibleError = class extends SteamError {
+	constructor(message = "Steam redirected to the market eligibility check — this account cannot use the market") {
+		super(message);
+		this.name = "MarketIneligibleError";
+	}
+};
+var CurrencyMismatchError = class extends SteamError {
+	expected;
+	actual;
+	constructor(expected, actual, context) {
+		super(`Currency mismatch in ${context}: expected ${expected}, got ${actual ?? "unknown"}`);
+		this.name = "CurrencyMismatchError";
+		this.expected = expected;
+		this.actual = actual;
+	}
+};
+var WalletCurrencyUnknownError = class extends SteamError {
+	constructor(context) {
+		super(`Wallet currency unknown for ${context} — seed walletCurrency or call getWalletDetails() first`);
+		this.name = "WalletCurrencyUnknownError";
+	}
+};
+var BuyOrderError = class extends SteamError {
+	stage;
+	code;
+	mayExist;
+	orderExists;
+	confirmationId;
+	constructor(message, options) {
+		super(message, {
+			...options.code !== void 0 ? { eresult: options.code } : {},
+			body: options.body,
+			cause: options.cause
+		});
+		this.name = "BuyOrderError";
+		this.stage = options.stage;
+		this.code = options.code;
+		this.orderExists = options.orderExists ?? false;
+		this.mayExist = options.mayExist || this.orderExists;
+		this.confirmationId = options.confirmationId;
 	}
 };
 var WalletBalanceLimitError = class extends SteamError {
@@ -909,6 +965,12 @@ const IMPIT_BROWSER = {
 	}
 };
 const BROWSER_ACCEPT$1 = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+function requestControl(control) {
+	const out = {};
+	if (control?.signal) out.signal = control.signal;
+	if (control?.timeoutMs !== void 0) out.timeoutMs = control.timeoutMs;
+	return out;
+}
 function clean(input) {
 	if (!input) return void 0;
 	const out = {};
@@ -952,7 +1014,8 @@ var HttpClient = class {
 		const res = await this.perform(method, url, opts);
 		const location = firstHeader(res.headers.location);
 		if (res.statusCode >= 300 && res.statusCode < 400 && location?.includes("/market/eligibilitycheck")) {
-			await this.perform("GET", location, opts.signal ? { signal: opts.signal } : {});
+			await this.perform("GET", location, requestControl(opts));
+			if (opts.noEligibilityReplay) return res;
 			return this.perform(method, url, opts);
 		}
 		return res;
@@ -1203,7 +1266,7 @@ function httpError(res, rateLimitWindowMs) {
 	if (res.statusCode >= 300 && res.statusCode <= 399) {
 		const loc = locationHeader(res);
 		if (loc.includes("/login")) return new SteamSessionExpiredError();
-		if (loc.includes("eligibilitycheck")) return new SteamError("Steam redirected to the market eligibility check — this account is limited / not trade-eligible");
+		if (loc.includes("eligibilitycheck")) return new MarketIneligibleError("Steam redirected to the market eligibility check — this account is limited / not trade-eligible");
 	}
 	return new HttpStatusError(res.statusCode, void 0, res.body);
 }
@@ -1607,8 +1670,11 @@ function xmlValue(xml, tag) {
 }
 //#endregion
 //#region src/http/queryTime.ts
-async function queryServerTimeOffset(http) {
-	const res = await http.post(`${URLS.api}/ITwoFactorService/QueryTime/v1/`, { responseType: "json" });
+async function queryServerTimeOffset(http, control) {
+	const res = await http.post(`${URLS.api}/ITwoFactorService/QueryTime/v1/`, {
+		...requestControl(control),
+		responseType: "json"
+	});
 	if (res.statusCode !== 200) throw httpError(res);
 	const serverTime = Number(res.body?.response?.server_time);
 	if (!serverTime) throw new SteamError("Failed to query Steam server time");
@@ -1638,9 +1704,9 @@ var ConfirmationManager = class {
 		const android = getDeviceID(this.steamID.getSteamID64());
 		return this.profile.mobileClient === "ios" ? android.replace(/^android:/, "").toUpperCase() : android;
 	}
-	async getConfirmations(time, key) {
+	async getConfirmations(time, key, control) {
 		const { tag, k } = splitKey(key, "conf");
-		const body = await this.getlist(k, time, tag);
+		const body = await this.getlist(k, time, tag, control);
 		if (!body?.success) {
 			if (body?.needauth) throw new SteamSessionExpiredError();
 			throw new ConfirmationError(String(body?.message ?? body?.detail ?? "Failed to get confirmation list"));
@@ -1658,13 +1724,14 @@ var ConfirmationManager = class {
 			icon: String(c.icon ?? "")
 		}));
 	}
-	async respondToConfirmation(confID, confKey, time, key, accept) {
+	async respondToConfirmation(confID, confKey, time, key, accept, control) {
 		const ids = Array.isArray(confID) ? confID : [confID];
 		const keys = Array.isArray(confKey) ? confKey : [confKey];
 		if (ids.length !== keys.length) throw new ConfirmationError("confID and confKey must have the same length");
 		const { tag, k } = splitKey(key, accept ? "allow" : "cancel");
 		const op = accept ? "allow" : "cancel";
 		const res = await this.http.post(`${URLS.community}/mobileconf/multiajaxop`, {
+			...requestControl(control),
 			responseType: "json",
 			searchParams: {
 				...this.confParams(k, time, tag),
@@ -1680,16 +1747,17 @@ var ConfirmationManager = class {
 		});
 		if (res.statusCode !== 200) throw httpError(res);
 		if (res.body?.success) return;
+		if (res.body === void 0 || res.body === null) throw new ConfirmationOutcomeUnknownError();
 		throw new ConfirmationError(String(res.body?.message ?? "Could not act on confirmation"));
 	}
-	async getPending() {
+	async getPending(control) {
 		const secret = this.requireSecret();
-		const listTime = time(await this.getTimeOffset());
+		const listTime = time(await this.getTimeOffset(control));
 		const listKey = getConfirmationKey(secret, listTime, "list");
 		return this.getConfirmations(listTime, {
 			tag: "list",
 			key: listKey
-		});
+		}, control);
 	}
 	acceptConfirmation(confID, nonce) {
 		return this.actOnConfirmations([{
@@ -1703,11 +1771,11 @@ var ConfirmationManager = class {
 			key: nonce
 		}], false);
 	}
-	acceptConfirmations(confs) {
-		return this.actOnConfirmations(confs, true);
+	acceptConfirmations(confs, control) {
+		return this.actOnConfirmations(confs, true, control);
 	}
-	rejectConfirmations(confs) {
-		return this.actOnConfirmations(confs, false);
+	rejectConfirmations(confs, control) {
+		return this.actOnConfirmations(confs, false, control);
 	}
 	async acceptAll() {
 		const pending = await this.getPending();
@@ -1719,17 +1787,17 @@ var ConfirmationManager = class {
 		if (!conf) throw new ConfirmationError(`Could not find confirmation for object ${objectID}`);
 		await this.acceptConfirmation(conf.id, conf.key);
 	}
-	async actOnConfirmations(confs, accept) {
+	async actOnConfirmations(confs, accept, control) {
 		if (confs.length === 0) return;
 		const secret = this.requireSecret();
-		const offset = await this.getTimeOffset();
+		const offset = await this.getTimeOffset(control);
 		const time = this.nextConfTime(offset);
 		const tag = accept ? "accept" : "cancel";
 		const key = getConfirmationKey(secret, time, tag);
 		await this.respondToConfirmation(confs.map((c) => c.id), confs.map((c) => c.key), time, {
 			tag,
 			key
-		}, accept);
+		}, accept, control);
 	}
 	requireSecret() {
 		if (!this.identitySecret) throw new ConfirmationError("identitySecret is required to respond to confirmations");
@@ -1743,9 +1811,9 @@ var ConfirmationManager = class {
 		if (this.usedConfTimes.length > 60) this.usedConfTimes.splice(0, this.usedConfTimes.length - 60);
 		return time$1;
 	}
-	async getTimeOffset() {
+	async getTimeOffset(control) {
 		if (this.timeOffset !== void 0 && Date.now() - this.timeOffsetAt < TIME_OFFSET_TTL_MS) return this.timeOffset;
-		const offset = await queryServerTimeOffset(this.http);
+		const offset = await queryServerTimeOffset(this.http, control);
 		this.timeOffset = offset;
 		this.timeOffsetAt = Date.now();
 		return offset;
@@ -1760,8 +1828,9 @@ var ConfirmationManager = class {
 			tag
 		};
 	}
-	async getlist(key, time, tag) {
+	async getlist(key, time, tag, control) {
 		const res = await this.http.get(`${URLS.community}/mobileconf/getlist`, {
+			...requestControl(control),
 			responseType: "json",
 			searchParams: this.confParams(key, time, tag)
 		});
@@ -1831,6 +1900,7 @@ var WebApiClient = class {
 			console.log(`[http] ${httpMethod} ${url}?${qs.toString()}`);
 		}
 		const res = await this.http.request(httpMethod, url, {
+			...requestControl(params),
 			responseType: "json",
 			...httpMethod === "GET" ? { searchParams: payload } : { form: payload }
 		});
@@ -1930,6 +2000,101 @@ var SteamWebApi = class {
 	}
 };
 //#endregion
+//#region src/market/fees.ts
+const DEFAULT_MARKET_FEE_INFO = Object.freeze({
+	walletFee: true,
+	walletFeePercent: .05,
+	walletFeeMinimum: 1,
+	walletFeeBase: 0,
+	publisherFeePercent: .1
+});
+function assertCents(name, value) {
+	if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`${name} must be a non-negative integer number of cents, got ${value}`);
+}
+const MAX_FEE_FRACTION = .5;
+function assertFeeInfo(info) {
+	const fraction = (v) => Number.isFinite(v) && v >= 0 && v < MAX_FEE_FRACTION;
+	const cents = (v) => Number.isSafeInteger(v) && v >= 0;
+	if (typeof info?.walletFee !== "boolean" || !fraction(info.walletFeePercent) || !fraction(info.publisherFeePercent) || !cents(info.walletFeeMinimum) || !cents(info.walletFeeBase)) throw new RangeError(`invalid market fee info: ${JSON.stringify(info)}`);
+}
+function feeInfoFromWalletInfo(raw, publisherFeePercent) {
+	const num = (v) => typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+	const info = {
+		walletFee: num(raw.wallet_fee) === 1,
+		walletFeePercent: num(raw.wallet_fee_percent),
+		walletFeeMinimum: num(raw.wallet_fee_minimum),
+		walletFeeBase: num(raw.wallet_fee_base),
+		publisherFeePercent: publisherFeePercent ?? num(raw.wallet_publisher_fee_percent_default)
+	};
+	if (num(raw.wallet_fee) !== 0 && num(raw.wallet_fee) !== 1) return null;
+	try {
+		assertFeeInfo(info);
+	} catch {
+		return null;
+	}
+	return info;
+}
+function buyerPaysForSellerReceives(receivedAmount, info) {
+	assertCents("receivedAmount", receivedAmount);
+	assertFeeInfo(info);
+	return amountToSend(receivedAmount, info);
+}
+function feesForBuyerPays(amount, info) {
+	assertCents("amount", amount);
+	assertFeeInfo(info);
+	if (!info.walletFee) return {
+		amount,
+		steamFee: 0,
+		publisherFee: 0,
+		fees: 0
+	};
+	let iterations = 0;
+	let estimate = Math.trunc((amount - Math.trunc(info.walletFeeBase)) / (info.walletFeePercent + info.publisherFeePercent + 1));
+	let everUndershot = false;
+	let fees = amountToSend(estimate, info);
+	while (fees.amount !== amount && iterations < 10) {
+		if (fees.amount > amount) {
+			if (everUndershot) {
+				fees = amountToSend(estimate - 1, info);
+				fees.steamFee += amount - fees.amount;
+				fees.fees += amount - fees.amount;
+				fees.amount = amount;
+				break;
+			}
+			estimate--;
+		} else {
+			everUndershot = true;
+			estimate++;
+		}
+		fees = amountToSend(estimate, info);
+		iterations++;
+	}
+	return fees;
+}
+function sellerReceivesForBuyerPays(amount, info) {
+	return Math.max(0, amount - feesForBuyerPays(amount, info).fees);
+}
+function landingBuyerPays(targetBuyerPays, info) {
+	const receives = sellerReceivesForBuyerPays(targetBuyerPays, info);
+	return receives === 0 ? 0 : buyerPaysForSellerReceives(receives, info).amount;
+}
+function amountToSend(receivedAmount, info) {
+	if (!info.walletFee) return {
+		amount: receivedAmount,
+		steamFee: 0,
+		publisherFee: 0,
+		fees: 0
+	};
+	const steamFee = Math.trunc(Math.floor(Math.max(receivedAmount * info.walletFeePercent, info.walletFeeMinimum) + Math.trunc(info.walletFeeBase)));
+	const publisherFee = Math.trunc(Math.floor(info.publisherFeePercent > 0 ? Math.max(receivedAmount * info.publisherFeePercent, 1) : 0));
+	return {
+		amount: Math.trunc(receivedAmount + steamFee + publisherFee),
+		steamFee,
+		publisherFee,
+		fees: steamFee + publisherFee
+	};
+}
+//#endregion
 //#region src/market/prices.ts
 function getPriceValueAsInt(strAmount) {
 	if (!strAmount) return 0;
@@ -1954,6 +2119,7 @@ function parseMarketHistory(body) {
 		sales: [],
 		purchases: [],
 		listingEvents: [],
+		malformed: [],
 		totalCount: body.total_count
 	};
 	if (!body.results_html) return history;
@@ -1969,11 +2135,19 @@ function parseMarketHistory(body) {
 		const displayPrice = textOf(row.inner, "market_listing_price").trim();
 		const rowId = attrValue(row.attrs, "id") ?? "";
 		const priceInCents = getPriceValueAsInt(displayPrice);
-		if (priceInCents === 0 && displayPrice) throw new SteamError(`Market history price parsed to 0 cents for "${displayPrice}" in row ${rowId || "?"}`);
 		const gainOrLoss = textOf(row.inner, "market_listing_gainorloss").trim();
 		const type = gainOrLoss === "-" ? "sale" : gainOrLoss === "+" ? "purchase" : "listing_event";
 		const idMatch = rowId.match(/^history_row_(\d+)_(\d+)$/);
 		if (!idMatch) continue;
+		if (priceInCents === 0 && (displayPrice || type !== "listing_event")) {
+			history.malformed.push({
+				historyId: rowId,
+				displayPrice,
+				gainOrLoss,
+				reason: displayPrice ? "zero_price" : "missing_price"
+			});
+			continue;
+		}
 		const event = {
 			historyId: rowId,
 			listingid: idMatch[1],
@@ -2107,23 +2281,56 @@ function decodeEntities(s) {
 		return NAMED_ENTITIES[ref.toLowerCase()] ?? whole;
 	});
 }
+function priceTextCurrency(text) {
+	const t = text.trim();
+	if (t.includes("€")) return t.includes("$") ? void 0 : 3;
+	const dollar = t.indexOf("$");
+	if (dollar === -1 || t.indexOf("$", dollar + 1) !== -1) return void 0;
+	if (/[A-Za-z]$/.test(t.slice(0, dollar)) || /^[A-Za-z]/.test(t.slice(dollar + 1))) return;
+	return 1;
+}
 //#endregion
 //#region src/market/MarketNamespace.ts
 const LISTINGS_PAGE_SIZE = 100;
 const MARKET_REFERER = `${URLS.community}/market/`;
+const LISTING_CURRENCY_BASE = 2e3;
+const BUY_ORDER_CONFIRMATION_LOOKUPS = [
+	0,
+	1e3,
+	2500
+];
+const BUY_ORDER_NOT_PLACED_CODES = /* @__PURE__ */ new Set([
+	15,
+	25,
+	107
+]);
+const UNKNOWN_OUTCOME_RE = /hearing back|double check/i;
+const DUPLICATE_ORDER_CODE = 29;
 var MarketNamespace = class {
 	http;
 	session;
 	confirmations;
 	api;
-	walletCurrency;
+	currency;
+	currencyVerified = false;
 	constructor(http, session, confirmations, api) {
 		this.http = http;
 		this.session = session;
 		this.confirmations = confirmations;
 		this.api = api;
 	}
-	async getWalletDetails() {
+	get walletCurrency() {
+		return this.currency;
+	}
+	get walletCurrencyVerified() {
+		return this.currencyVerified;
+	}
+	seedWalletCurrency(currency) {
+		if (!Number.isInteger(currency) || currency <= 0) throw new RangeError(`walletCurrency must be a positive integer, got ${currency}`);
+		if (this.currency !== void 0 && this.currency !== currency) throw new CurrencyMismatchError(this.currency, currency, "seedWalletCurrency");
+		this.currency = currency;
+	}
+	async getWalletDetails(options = {}) {
 		const body = await this.api.call({
 			httpMethod: "POST",
 			iface: "IUserAccountService",
@@ -2131,28 +2338,54 @@ var MarketNamespace = class {
 			input: {
 				include_balance_in_usd: 1,
 				include_formatted_balance: 1
-			}
+			},
+			...requestControl(options)
 		});
 		if (!body.response) throw new SteamError("Malformed wallet details response", { body });
 		const currency = body.response.currency_code;
-		if (typeof currency === "number" && currency > 0) this.walletCurrency = currency;
+		if (body.response.has_wallet === true && typeof currency === "number" && currency > 0) this.learnCurrency(currency, "wallet details");
 		return body.response;
 	}
+	async getMarketWalletInfo(options = {}) {
+		await this.session.getAccessToken();
+		const res = await this.http.get(`${URLS.community}/market/`, requestControl(options));
+		if (res.statusCode !== 200) throw httpError(res);
+		if (res.body.match(/g_steamID\s*=\s*"(\d+)"/)?.[1] !== this.session.steamID.getSteamID64()) throw new SteamSessionExpiredError("market page was not rendered for this account");
+		const match = res.body.match(/g_rgWalletInfo\s*=\s*(\{[^;]*?\});/);
+		if (!match?.[1]) throw new SteamError("g_rgWalletInfo not found on the market page");
+		let info;
+		try {
+			info = JSON.parse(match[1]);
+		} catch {
+			throw new SteamError("g_rgWalletInfo on the market page is not valid JSON");
+		}
+		const currency = Number(info.wallet_currency);
+		if (this.currency !== void 0 && currency !== this.currency) throw new CurrencyMismatchError(this.currency, currency, "g_rgWalletInfo");
+		return info;
+	}
 	async getMyListings(options = {}) {
+		const currency = this.readCurrency(options.currency, "mylistings");
 		await this.session.getAccessToken();
 		const result = {
 			listings: [],
 			listings_to_confirm: [],
+			listings_on_hold: [],
 			buy_orders: [],
-			num_active_listings: 0
+			num_active_listings: 0,
+			complete: false
 		};
+		const seen = /* @__PURE__ */ new Set();
+		let firstTotal;
+		let totalMoved = false;
+		let buyOrdersMissing = false;
 		let start = 0;
 		for (;;) {
 			const res = await this.http.get(`${URLS.community}/market/mylistings/`, {
+				...requestControl(options),
 				responseType: "json",
 				searchParams: {
 					norender: 1,
-					currency: options.currency ?? this.walletCurrency,
+					currency: currency ?? void 0,
 					start,
 					count: LISTINGS_PAGE_SIZE
 				}
@@ -2160,20 +2393,47 @@ var MarketNamespace = class {
 			if (res.statusCode !== 200) throw httpError(res);
 			const body = res.body;
 			if (!body?.success) throw new SteamError("Steam returned success=false for /market/mylistings", { body });
-			if (body.num_active_listings !== void 0) result.num_active_listings = body.num_active_listings;
+			if (body.num_active_listings !== void 0) {
+				result.num_active_listings = body.num_active_listings;
+				if (firstTotal === void 0) firstTotal = body.num_active_listings;
+				else if (body.num_active_listings !== firstTotal) totalMoved = true;
+			}
 			if (start === 0) {
 				if (Array.isArray(body.buy_orders)) result.buy_orders = body.buy_orders;
+				else buyOrdersMissing = true;
 				if (Array.isArray(body.listings_to_confirm)) result.listings_to_confirm = body.listings_to_confirm;
+				if (Array.isArray(body.listings_on_hold)) result.listings_on_hold = body.listings_on_hold;
 			}
 			const page = body.listings ?? body.results?.listings ?? [];
-			result.listings.push(...page);
+			for (const listing of page) {
+				if (seen.has(listing.listingid)) continue;
+				seen.add(listing.listingid);
+				result.listings.push(listing);
+			}
 			start += page.length;
-			if (start >= result.num_active_listings || page.length === 0) return result;
+			if (start >= result.num_active_listings || page.length === 0) break;
 		}
+		result.complete = !totalMoved && !buyOrdersMissing && result.listings.length === result.num_active_listings;
+		if (currency !== null) {
+			for (const order of result.buy_orders) {
+				const actual = Number(order.wallet_currency);
+				if (actual !== currency) throw new CurrencyMismatchError(currency, actual, "buy orders");
+			}
+			const all = [
+				...result.listings,
+				...result.listings_to_confirm,
+				...result.listings_on_hold
+			];
+			for (const listing of all) assertListingCurrency(listing, currency);
+			if (result.buy_orders.length > 0 || all.length > 0) this.confirmCurrency(currency);
+		}
+		return result;
 	}
 	async getMyHistory(options = {}) {
+		const currency = this.readCurrency(options.currency, "myhistory");
 		await this.session.getAccessToken();
 		const res = await this.http.get(`${URLS.community}/market/myhistory`, {
+			...requestControl(options),
 			responseType: "json",
 			searchParams: {
 				count: options.count ?? 500,
@@ -2182,49 +2442,92 @@ var MarketNamespace = class {
 		});
 		if (res.statusCode !== 200) throw httpError(res);
 		if (!res.body?.success) throw new SteamError("Steam returned success=false for /market/myhistory", { body: res.body });
-		return parseMarketHistory(res.body);
+		const history = parseMarketHistory(res.body);
+		if (currency !== null && PINNED_PRICE_FORMATS.has(currency)) {
+			const other = new Set(history.events.filter((e) => e.displayPrice && priceTextCurrency(e.displayPrice) !== currency).map((e) => e.historyId));
+			if (other.size > 0) {
+				for (const e of history.events) {
+					if (!other.has(e.historyId)) continue;
+					history.malformed.push({
+						historyId: e.historyId,
+						displayPrice: e.displayPrice,
+						gainOrLoss: e.type === "sale" ? "-" : e.type === "purchase" ? "+" : "",
+						reason: "other_currency"
+					});
+				}
+				const keep = (rows) => rows.filter((r) => !other.has(r.historyId));
+				history.events = keep(history.events);
+				history.sales = keep(history.sales);
+				history.purchases = keep(history.purchases);
+				history.listingEvents = keep(history.listingEvents);
+			}
+		}
+		return history;
 	}
 	async getOrderbook(appid, marketHashName, options = {}) {
+		const expected = this.readCurrency(options.expectedCurrency, "orderbook");
 		await this.session.getAccessToken();
 		const qp = encodeURIComponent(JSON.stringify([appid, marketHashName]));
-		const res = await this.http.get(`${URLS.community}/market/orderbook?q=Load&qp=${qp}`, { responseType: "json" });
+		const res = await this.http.get(`${URLS.community}/market/orderbook?q=Load&qp=${qp}`, {
+			...requestControl(options),
+			responseType: "json"
+		});
 		if (res.statusCode === 403) throw new ThrottledError(void 0, { body: res.body });
 		if (res.statusCode !== 200) throw httpError(res);
 		const body = res.body;
 		const payload = body && body.success === void 0 && body.data ? body.data : body;
 		if (!payload?.success || !payload.data) throw new SteamError(`Bad orderbook response for ${marketHashName}`, { body });
 		const data = payload.data;
-		const expected = options.expectedCurrency ?? this.walletCurrency;
-		if (expected && data.eCurrency !== expected) throw new SteamError(`Orderbook currency ${data.eCurrency} != expected ${expected} for ${marketHashName}`, { body });
+		if (expected !== null) {
+			if (data.eCurrency !== expected) throw new CurrencyMismatchError(expected, data.eCurrency, `orderbook of ${marketHashName}`);
+			this.confirmCurrency(expected);
+		}
 		return data;
 	}
-	async getPriceHistory(appid, marketHashName) {
+	async getPriceHistory(appid, marketHashName, options = {}) {
+		const expected = this.readCurrency(options.expectedCurrency, "pricehistory");
 		await this.session.getAccessToken();
-		const res = await this.http.get(`${URLS.community}/market/pricehistory?appid=${appid}&market_hash_name=${encodeURIComponent(marketHashName)}`, { responseType: "json" });
+		const res = await this.http.get(`${URLS.community}/market/pricehistory?appid=${appid}&market_hash_name=${encodeURIComponent(marketHashName)}`, {
+			...requestControl(options),
+			responseType: "json"
+		});
 		if (res.statusCode !== 200) throw httpError(res);
 		if (!res.body?.success) throw new SteamError(`Steam returned success=false for pricehistory of ${marketHashName}`, { body: res.body });
+		if (expected !== null && PINNED_PRICE_FORMATS.has(expected)) {
+			const actual = priceHistoryCurrency(res.body.price_prefix, res.body.price_suffix);
+			if (actual !== expected) throw new CurrencyMismatchError(expected, actual, `pricehistory of ${marketHashName}`);
+		}
 		return Array.isArray(res.body.prices) ? res.body.prices : [];
 	}
-	async getMarketItemDetails(appid, marketHashName) {
+	async getMarketItemDetails(appid, marketHashName, options = {}) {
 		await this.session.getAccessToken();
 		const query = encodeURIComponent(`"${marketHashName}"`);
-		const res = await this.http.get(`${URLS.community}/market/search/render/?query=${query}&start=0&count=10&search_descriptions=0&sort_column=quantity&sort_dir=desc&appid=${appid}&norender=1`, { responseType: "json" });
+		const res = await this.http.get(`${URLS.community}/market/search/render/?query=${query}&start=0&count=10&search_descriptions=0&sort_column=quantity&sort_dir=desc&appid=${appid}&norender=1`, {
+			...requestControl(options),
+			responseType: "json"
+		});
 		if (res.statusCode !== 200) throw httpError(res);
 		const body = res.body;
-		if (!body || typeof body !== "object") throw new SteamError("Malformed market search response", { body });
+		if (!body || typeof body !== "object" || body.success === false) throw new SteamError("Malformed or unsuccessful market search response", { body });
 		return (Array.isArray(body.results) ? body.results : []).find((r) => r.hash_name === marketHashName) ?? null;
 	}
 	async sellItem(options) {
+		this.writeCurrency(options.currency, "sellitem");
+		assertPositiveCents("price", options.price);
+		const amount = options.amount ?? 1;
+		assertPositiveCents("amount", amount);
 		await this.session.getAccessToken();
 		const sessionid = await this.http.getSessionId();
 		const res = await this.http.post(`${URLS.community}/market/sellitem/`, {
+			...requestControl(options),
+			noEligibilityReplay: true,
 			responseType: "json",
 			form: {
 				sessionid,
 				appid: options.appid,
 				contextid: options.contextid ?? "2",
 				assetid: options.assetid,
-				amount: options.amount ?? 1,
+				amount,
 				price: options.price
 			},
 			headers: { Referer: MARKET_REFERER }
@@ -2239,10 +2542,12 @@ var MarketNamespace = class {
 			body
 		});
 	}
-	async cancelListing(listingId) {
+	async cancelListing(listingId, options = {}) {
 		await this.session.getAccessToken();
 		const sessionid = await this.http.getSessionId();
 		const res = await this.http.post(`${URLS.community}/market/removelisting/${listingId}`, {
+			...requestControl(options),
+			noEligibilityReplay: true,
 			form: { sessionid },
 			headers: { Referer: MARKET_REFERER }
 		});
@@ -2250,8 +2555,10 @@ var MarketNamespace = class {
 		throw httpError(res);
 	}
 	async createBuyOrder(options) {
-		const currency = options.currency ?? this.walletCurrency;
-		if (!currency) throw new SteamError("Wallet currency unknown — call getWalletDetails() or pass currency");
+		const currency = this.writeCurrency(options.currency, "createbuyorder");
+		assertPositiveCents("quantity", options.quantity);
+		assertPositiveCents("priceTotal", options.priceTotal);
+		if (options.priceTotal % options.quantity !== 0) throw new RangeError("priceTotal must be the per-unit price times quantity");
 		await this.session.getAccessToken();
 		const sessionid = await this.http.getSessionId();
 		const referer = `${URLS.community}/market/listings/${options.appid}/${encodeURIComponent(options.marketHashName)}`;
@@ -2264,24 +2571,44 @@ var MarketNamespace = class {
 			quantity: options.quantity,
 			confirmation: 0
 		};
-		const first = await this.postBuyOrder(form, referer);
-		const direct = buyOrderId(first);
-		if (direct) return direct;
-		const confirmationId = first.body?.confirmation?.confirmation_id;
-		if (!confirmationId) throw buyOrderError(first, `No confirmation_id (HTTP ${first.statusCode})`);
-		await this.confirmations.acceptConfirmationForObject(String(confirmationId));
-		const final = await this.postBuyOrder({
-			...form,
-			confirmation: String(confirmationId)
-		}, referer);
-		const orderId = buyOrderId(final);
-		if (orderId) return orderId;
-		throw buyOrderError(final, `Finalization failed (HTTP ${final.statusCode})`);
+		let first;
+		try {
+			first = await this.postBuyOrder(form, referer, options);
+		} catch (err) {
+			if (isNotPlacedError(err)) throw err;
+			throw new BuyOrderError("createbuyorder request failed", {
+				stage: "create",
+				mayExist: true,
+				cause: err
+			});
+		}
+		if (first.buyOrderId) return first.buyOrderId;
+		const confirmationId = first.confirmationId;
+		if (!confirmationId) throw buyOrderRefusal(first, "create");
+		await this.acceptBuyOrderConfirmation(confirmationId, options);
+		let final;
+		try {
+			final = await this.postBuyOrder({
+				...form,
+				confirmation: confirmationId
+			}, referer, options);
+		} catch (err) {
+			throw new BuyOrderError("createbuyorder finalize request failed", {
+				stage: "finalize",
+				mayExist: true,
+				confirmationId,
+				cause: err
+			});
+		}
+		if (final.buyOrderId) return final.buyOrderId;
+		throw buyOrderRefusal(final, "finalize", confirmationId);
 	}
-	async cancelBuyOrder(buyOrderId) {
+	async cancelBuyOrder(buyOrderId, options = {}) {
 		await this.session.getAccessToken();
 		const sessionid = await this.http.getSessionId();
 		const res = await this.http.post(`${URLS.community}/market/cancelbuyorder/`, {
+			...requestControl(options),
+			noEligibilityReplay: true,
 			responseType: "json",
 			form: {
 				sessionid,
@@ -2290,15 +2617,35 @@ var MarketNamespace = class {
 			headers: { Referer: MARKET_REFERER }
 		});
 		if (res.statusCode !== 200) throw httpError(res);
-		return res.body ?? {};
+		const body = res.body ?? {};
+		if (body.success === 1 || body.success === true) return body;
+		throw new SteamError(`cancelbuyorder refused for ${buyOrderId}`, {
+			...eresultOf(body),
+			body
+		});
 	}
-	async confirmListings(expected) {
+	async confirmListingIds(listingIds, options = {}) {
+		const wanted = new Set(listingIds.map(String));
+		if (wanted.size === 0) return {
+			confirmed: [],
+			missing: []
+		};
+		await this.session.getAccessToken();
+		const confirmed = (await this.confirmations.getPending(options)).filter((c) => c.type === 3 && wanted.has(c.creator));
+		await this.confirmations.acceptConfirmations(confirmed, options);
+		const found = new Set(confirmed.map((c) => c.creator));
+		return {
+			confirmed,
+			missing: [...wanted].filter((id) => !found.has(id))
+		};
+	}
+	async confirmListings(expected, options = {}) {
 		if (Object.values(expected).reduce((sum, n) => sum + n, 0) === 0) return {
 			confirmed: [],
 			skipped: []
 		};
 		await this.session.getAccessToken();
-		const listings = (await this.confirmations.getPending()).filter((c) => c.type === 3).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+		const listings = (await this.confirmations.getPending(options)).filter((c) => c.type === 3).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 		const remaining = { ...expected };
 		const confirmed = [];
 		const skipped = [];
@@ -2311,28 +2658,159 @@ var MarketNamespace = class {
 			confirmed.push(conf);
 			remaining[name] = (remaining[name] ?? 0) - 1;
 		}
-		await this.confirmations.acceptConfirmations(confirmed);
+		await this.confirmations.acceptConfirmations(confirmed, options);
 		return {
 			confirmed,
 			skipped
 		};
 	}
-	async rejectListings(types = [3]) {
+	async rejectListings(types = [3], options = {}) {
 		await this.session.getAccessToken();
-		const matched = (await this.confirmations.getPending()).filter((c) => types.includes(c.type));
-		await this.confirmations.rejectConfirmations(matched);
+		const keep = new Set((options.keepCreators ?? []).map(String));
+		const matched = (await this.confirmations.getPending(options)).filter((c) => types.includes(c.type) && !keep.has(c.creator));
+		await this.confirmations.rejectConfirmations(matched, options);
 		return matched;
 	}
-	async postBuyOrder(form, referer) {
+	async acceptBuyOrderConfirmation(confirmationId, options) {
+		let conf;
+		try {
+			for (const delay of BUY_ORDER_CONFIRMATION_LOOKUPS) {
+				if (delay > 0) await sleep(delay, options.signal);
+				conf = (await this.confirmations.getPending(options)).find((c) => c.creator === confirmationId && c.type === 12);
+				if (conf) break;
+			}
+		} catch (err) {
+			throw new BuyOrderError("could not read the buy order's mobile confirmation", {
+				stage: "confirm",
+				mayExist: false,
+				confirmationId,
+				cause: err
+			});
+		}
+		if (!conf) throw new BuyOrderError(`no mobile confirmation found for buy order ${confirmationId}`, {
+			stage: "confirm",
+			mayExist: false,
+			confirmationId
+		});
+		try {
+			await this.confirmations.acceptConfirmations([conf], options);
+		} catch (err) {
+			throw new BuyOrderError("accepting the buy order's mobile confirmation failed", {
+				stage: "confirm",
+				mayExist: !(err instanceof ConfirmationError && !(err instanceof ConfirmationOutcomeUnknownError)),
+				confirmationId,
+				cause: err
+			});
+		}
+	}
+	async postBuyOrder(form, referer, control) {
 		const res = await this.http.post(`${URLS.community}/market/createbuyorder/`, {
-			responseType: "json",
+			...requestControl(control),
+			noEligibilityReplay: true,
 			form,
 			headers: { Referer: referer }
 		});
 		if (res.statusCode === 429 || res.statusCode === 401) throw httpError(res);
-		return res;
+		const raw = typeof res.body === "string" ? res.body : "";
+		const body = safeJson(raw);
+		const ok = body?.success === 1 || body?.success === true || body?.success === void 0 && body?.wallet_info?.success === 1;
+		return {
+			res,
+			body,
+			buyOrderId: res.statusCode === 200 && ok ? rawIdField(raw, "buy_orderid") ?? void 0 : void 0,
+			confirmationId: rawIdField(raw, "confirmation_id") ?? void 0
+		};
+	}
+	readCurrency(explicit, context) {
+		if (explicit === null) return null;
+		const known = this.currency;
+		if (explicit !== void 0) {
+			if (known !== void 0 && explicit !== known) throw new CurrencyMismatchError(known, explicit, context);
+			return explicit;
+		}
+		if (known === void 0) throw new WalletCurrencyUnknownError(context);
+		return known;
+	}
+	writeCurrency(explicit, context) {
+		const known = this.currency;
+		if (known === void 0 || !this.currencyVerified) throw new WalletCurrencyUnknownError(context);
+		if (explicit !== void 0 && explicit !== known) throw new CurrencyMismatchError(known, explicit, context);
+		return known;
+	}
+	learnCurrency(currency, context) {
+		if (this.currency !== void 0 && this.currency !== currency) throw new CurrencyMismatchError(this.currency, currency, context);
+		this.currency = currency;
+		this.currencyVerified = true;
+	}
+	confirmCurrency(currency) {
+		if (this.currency === currency) this.currencyVerified = true;
 	}
 };
+function summarizeOrderbook(data) {
+	const sells = depth(data.rgCompactSellOrders, "asc");
+	const buys = depth(data.rgCompactBuyOrders, "desc");
+	return {
+		currency: data.eCurrency,
+		lowestAsk: level(data.amtMinSellOrder, sells),
+		askVolumeAtLowest: sells[1] ?? 0,
+		secondLowestAsk: sells.length >= 4 ? sells[2] ?? null : null,
+		highestBid: level(data.amtMaxBuyOrder, buys),
+		bidVolumeAtHighest: buys[1] ?? 0,
+		secondHighestBid: buys.length >= 4 ? buys[2] ?? null : null
+	};
+}
+function wholeCents(v) {
+	if (typeof v === "number") return Number.isSafeInteger(v) ? v : null;
+	if (typeof v === "string" && /^\d+$/.test(v)) {
+		const n = Number(v);
+		return Number.isSafeInteger(n) ? n : null;
+	}
+	return null;
+}
+function depth(raw, order) {
+	if (raw === void 0 || raw === null) return [];
+	if (!Array.isArray(raw) || raw.length % 2 !== 0) throw new SteamError("Malformed orderbook depth", { body: raw });
+	const out = [];
+	for (const v of raw) {
+		const n = wholeCents(v);
+		if (n === null || n <= 0) throw new SteamError("Malformed orderbook depth", { body: raw });
+		out.push(n);
+	}
+	for (let i = 2; i < out.length; i += 2) {
+		const prev = out[i - 2];
+		const cur = out[i];
+		if (order === "asc" ? cur <= prev : cur >= prev) throw new SteamError("Orderbook depth is not strictly ordered", { body: raw });
+	}
+	return out;
+}
+function level(best, levels) {
+	if (best === null || best === void 0) {
+		if (levels.length > 0) throw new SteamError("Orderbook has depth but no best level");
+		return null;
+	}
+	const value = wholeCents(best);
+	if (value === null || value <= 0) throw new SteamError(`Malformed orderbook best level ${best}`);
+	if (levels.length === 0 || levels[0] !== value) throw new SteamError(`Orderbook best level ${value} disagrees with its depth ${levels[0]}`);
+	return value;
+}
+const PINNED_PRICE_FORMATS = /* @__PURE__ */ new Set([1, 3]);
+function priceHistoryCurrency(prefix, suffix) {
+	const p = typeof prefix === "string" ? prefix.trim() : "";
+	const s = typeof suffix === "string" ? suffix.trim() : "";
+	if (p === "$" && s === "") return 1;
+	if (p === "" && s === "€") return 3;
+}
+function assertListingCurrency(listing, currency) {
+	const raw = listing.currencyid;
+	const actual = raw === void 0 || raw === null ? void 0 : Number(raw) - LISTING_CURRENCY_BASE;
+	if (actual !== currency) throw new CurrencyMismatchError(currency, actual, `listing ${listing.listingid}`);
+}
+function assertPositiveCents(name, value) {
+	if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${name} must be a positive integer, got ${value}`);
+}
+function isNotPlacedError(err) {
+	return err instanceof RateLimitError || err instanceof SteamSessionExpiredError || err instanceof MarketIneligibleError;
+}
 function redirectsToMarket(res) {
 	const location = res.headers.location;
 	if (typeof location !== "string" || !URL.canParse(location, URLS.community)) return false;
@@ -2349,23 +2827,70 @@ function sellItemError(message, body) {
 		body
 	};
 	const lower = message.toLowerCase();
-	if (lower.includes("pending confirmation")) return new MarketConfirmationLimitError(message, options);
+	if (lower.includes("pending confirmation")) {
+		const reason = lower.includes("already have a listing") ? "item_pending" : lower.includes("too many") ? "too_many_pending" : "unknown";
+		return new MarketConfirmationLimitError(message, {
+			...options,
+			reason
+		});
+	}
 	if (lower.includes("maximum wallet balance")) return new WalletBalanceLimitError(message, options);
 	if (lower.includes("unable to use the community market")) return new MarketBlockedError(message, options);
+	if (lower.includes("no longer in your inventory") || lower.includes("not allowed to be traded")) return new MarketItemUnavailableError(message, options);
 	return new SteamError(message, options);
 }
-function buyOrderId(res) {
-	const body = res.body;
-	const ok = body?.success === 1 || body?.success === true || body?.wallet_info?.success === 1;
-	return res.statusCode === 200 && ok && body?.buy_orderid ? String(body.buy_orderid) : void 0;
-}
-function buyOrderError(res, fallback) {
-	const body = res.body;
-	const eresult = eresultOf(body);
-	if (!body?.message && eresult.eresult === void 0 && ![200, 406].includes(res.statusCode)) return httpError(res);
-	return new SteamError(body?.message || fallback, {
-		...eresult,
+function buyOrderRefusal(reply, stage, confirmationId) {
+	const { res, body } = reply;
+	const code = typeof body?.success === "number" && body.success !== 1 ? body.success : void 0;
+	const message = typeof body?.message === "string" ? body.message : void 0;
+	if (code === 15 || message?.toLowerCase().includes("unable to use the community market")) return new MarketBlockedError(message, {
+		...code !== void 0 ? { eresult: code } : {},
 		body
+	});
+	if (code === void 0 && message === void 0 && stage === "create") {
+		if (![200, 406].includes(res.statusCode)) {
+			const transport = httpError(res);
+			if (isNotPlacedError(transport)) return transport;
+		}
+	}
+	const unknownOutcome = message !== void 0 && UNKNOWN_OUTCOME_RE.test(message);
+	const notPlaced = code !== void 0 && BUY_ORDER_NOT_PLACED_CODES.has(code) && !unknownOutcome;
+	const orderExists = code === DUPLICATE_ORDER_CODE || message !== void 0 && /already have an active buy order/i.test(message);
+	return new BuyOrderError(message ?? `createbuyorder ${stage} failed (HTTP ${res.statusCode})`, {
+		stage,
+		mayExist: !notPlaced,
+		orderExists,
+		...code !== void 0 ? { code } : {},
+		...confirmationId !== void 0 ? { confirmationId } : {},
+		body: body ?? res.body
+	});
+}
+function safeJson(text) {
+	if (!text) return void 0;
+	try {
+		return JSON.parse(text);
+	} catch {
+		return;
+	}
+}
+function rawIdField(raw, field) {
+	return raw.match(new RegExp(`"${field}"\\s*:\\s*"?(\\d+)"?`))?.[1] ?? null;
+}
+function sleep(ms, signal) {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(signal?.reason);
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
 /**
@@ -3474,6 +3999,7 @@ var SteamMobile = class extends EventEmitter {
 		this.trade = new TradeNamespace(this.api, this.http, this.session, this.confirmations);
 		this.community = new CommunityNamespace(this.http, this.session, this.confirmations, this.api);
 		this.market = new MarketNamespace(this.http, this.session, this.confirmations, this.api);
+		if (options.walletCurrency !== void 0) this.market.seedWalletCurrency(options.walletCurrency);
 		this.session.on("refreshToken", (token) => this.emit("refreshToken", token));
 		this.session.on("sessionExpired", (error) => this.emit("sessionExpired", error));
 		this.session.on("debug", (message) => this.emit("debug", message));
@@ -3533,6 +4059,6 @@ var SteamMobile = class extends EventEmitter {
 	}
 };
 //#endregion
-export { ANDROID_PROFILE, AccessTokenError, AuthClient, CommunityNamespace, ConfirmationError, ConfirmationManager, CredentialSession, DEFAULT_CONTEXTID, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, EscrowError, FamilyViewError, HttpClient, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, LANG, LoginError, MarketBlockedError, MarketConfirmationLimitError, MarketNamespace, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OpenIdError, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, RateLimitError, SessionManager, SteamError, SteamMobile, SteamSessionExpiredError, SteamWebApi, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, ThrottledError, TradeBanError, TradeNamespace, TradeOffer, URLS, WalletBalanceLimitError, WebApiClient, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, getPriceValueAsInt, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, loginWithCredentials, parseInventory, parseMarketHistory, parseOpenidForm, parsePartnerInventory, resolveMobileProfile, resolveTarget, secondsUntilExpiry, steamOpenidLogin };
+export { ANDROID_PROFILE, AccessTokenError, AuthClient, BuyOrderError, CommunityNamespace, ConfirmationError, ConfirmationManager, ConfirmationOutcomeUnknownError, CredentialSession, CurrencyMismatchError, DEFAULT_CONTEXTID, DEFAULT_MARKET_FEE_INFO, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, EscrowError, FamilyViewError, HttpClient, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, LANG, LoginError, MarketBlockedError, MarketConfirmationLimitError, MarketIneligibleError, MarketItemUnavailableError, MarketNamespace, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OpenIdError, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, RateLimitError, SessionManager, SteamError, SteamMobile, SteamSessionExpiredError, SteamWebApi, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, ThrottledError, TradeBanError, TradeNamespace, TradeOffer, URLS, WalletBalanceLimitError, WalletCurrencyUnknownError, WebApiClient, buyerPaysForSellerReceives, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, feeInfoFromWalletInfo, feesForBuyerPays, getPriceValueAsInt, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, landingBuyerPays, loginWithCredentials, parseInventory, parseMarketHistory, parseOpenidForm, parsePartnerInventory, priceTextCurrency, resolveMobileProfile, resolveTarget, secondsUntilExpiry, sellerReceivesForBuyerPays, steamOpenidLogin, summarizeOrderbook };
 
 //# sourceMappingURL=index.mjs.map

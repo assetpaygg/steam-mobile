@@ -13,6 +13,9 @@ bot.refreshtoken
 *.maFile
 debug/ratelimit-history.ts
 
+# Probe reports (live account data)
+debug/out/
+
 # Poll data
 polldata*.json
 

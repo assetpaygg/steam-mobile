@@ -34,6 +34,11 @@ export interface SteamMobileOptions {
   mobileProfile?: MobilePlatform | Partial<MobileProfile>;
   // Start polling after login. `true` uses defaults; pass PollOptions to tune cadence or resume from saved pollData.
   polling?: boolean | PollOptions;
+  // The account's known wallet currency (1 = USD, 3 = EUR, …), e.g. persisted from an earlier
+  // getWalletDetails(). Market reads check against it from the first request; a wallet that later
+  // reports a different currency throws instead of being trusted. Writes still wait for a live read
+  // to verify it.
+  walletCurrency?: number;
 }
 
 export type ReauthenticateOptions = Omit<LoginWithCredentialsOptions, "proxy" | "mobileProfile">;
@@ -73,6 +78,8 @@ export class SteamMobile extends EventEmitter<SteamMobileEvents> {
     this.trade = new TradeNamespace(this.api, this.http, this.session, this.confirmations);
     this.community = new CommunityNamespace(this.http, this.session, this.confirmations, this.api);
     this.market = new MarketNamespace(this.http, this.session, this.confirmations, this.api);
+    if (options.walletCurrency !== undefined)
+      this.market.seedWalletCurrency(options.walletCurrency);
 
     this.session.on("refreshToken", (token) => this.emit("refreshToken", token));
     this.session.on("sessionExpired", (error) => this.emit("sessionExpired", error));

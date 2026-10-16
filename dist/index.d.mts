@@ -44,7 +44,9 @@ interface RequestOptions {
   referer?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  noEligibilityReplay?: boolean;
 }
+type RequestControl = Pick<RequestOptions, "signal" | "timeoutMs">;
 declare class HttpClient {
   readonly jar: CookieJar;
   private readonly webClient;
@@ -938,6 +940,7 @@ interface RawMyListingsResponse {
     [key: string]: unknown;
   };
   listings_to_confirm?: RawMarketListing[];
+  listings_on_hold?: RawMarketListing[];
   buy_orders?: RawMarketBuyOrder[];
   [key: string]: unknown;
 }
@@ -1009,6 +1012,22 @@ interface RawCancelBuyOrderResponse {
   success?: boolean | number;
   [key: string]: unknown;
 }
+interface RawMarketWalletInfo {
+  wallet_currency?: number;
+  wallet_country?: string;
+  wallet_state?: string;
+  wallet_fee?: number | string;
+  wallet_fee_minimum?: number | string;
+  wallet_fee_percent?: number | string;
+  wallet_publisher_fee_percent_default?: number | string;
+  wallet_fee_base?: number | string;
+  wallet_balance?: number | string;
+  wallet_delayed_balance?: number | string;
+  wallet_max_balance?: number | string;
+  wallet_trade_max_balance?: number | string;
+  success?: number | boolean;
+  [key: string]: unknown;
+}
 interface RawWalletDetails {
   has_wallet?: boolean;
   user_country_code?: string;
@@ -1054,6 +1073,8 @@ interface ApiCallParams {
   version?: number;
   input?: Record<string, Scalar | undefined>;
   retryAfterMs?: number | null;
+  signal?: AbortSignal | undefined;
+  timeoutMs?: number | undefined;
 }
 type ApiBody = {
   response?: Record<string, unknown>;
@@ -1117,13 +1138,13 @@ declare class ConfirmationManager {
   constructor(http: HttpClient, steamID: SteamID, identitySecret: string | undefined, profile: MobileProfile);
   get hasIdentitySecret(): boolean;
   private deviceId;
-  getConfirmations(time: number, key: ConfKey): Promise<Confirmation[]>;
-  respondToConfirmation(confID: string | string[], confKey: string | string[], time: number, key: ConfKey, accept: boolean): Promise<void>;
-  getPending(): Promise<Confirmation[]>;
+  getConfirmations(time: number, key: ConfKey, control?: RequestControl): Promise<Confirmation[]>;
+  respondToConfirmation(confID: string | string[], confKey: string | string[], time: number, key: ConfKey, accept: boolean, control?: RequestControl): Promise<void>;
+  getPending(control?: RequestControl): Promise<Confirmation[]>;
   acceptConfirmation(confID: string, nonce: string): Promise<void>;
   rejectConfirmation(confID: string, nonce: string): Promise<void>;
-  acceptConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void>;
-  rejectConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void>;
+  acceptConfirmations(confs: Pick<Confirmation, "id" | "key">[], control?: RequestControl): Promise<void>;
+  rejectConfirmations(confs: Pick<Confirmation, "id" | "key">[], control?: RequestControl): Promise<void>;
   acceptAll(): Promise<Confirmation[]>;
   acceptConfirmationForObject(objectID: string): Promise<void>;
   private actOnConfirmations;
@@ -1275,16 +1296,56 @@ declare class ItemServerUnavailableError extends SteamError {
 declare class ConfirmationError extends SteamError {
   constructor(message: string);
 }
+declare class ConfirmationOutcomeUnknownError extends ConfirmationError {
+  constructor(message?: string);
+}
 declare class FamilyViewError extends SteamError {
   constructor(message?: string);
 }
 declare class PrivateInventoryError extends SteamError {
   constructor(message?: string);
 }
+type MarketConfirmationLimitReason = "too_many_pending" | "item_pending" | "unknown";
 declare class MarketConfirmationLimitError extends SteamError {
+  readonly reason: MarketConfirmationLimitReason;
   constructor(message?: string, options?: {
     eresult?: number;
     body?: unknown;
+    reason?: MarketConfirmationLimitReason;
+  });
+}
+declare class MarketItemUnavailableError extends SteamError {
+  constructor(message: string, options?: {
+    eresult?: number;
+    body?: unknown;
+  });
+}
+declare class MarketIneligibleError extends SteamError {
+  constructor(message?: string);
+}
+declare class CurrencyMismatchError extends SteamError {
+  readonly expected: number;
+  readonly actual: number | undefined;
+  constructor(expected: number, actual: number | undefined, context: string);
+}
+declare class WalletCurrencyUnknownError extends SteamError {
+  constructor(context: string);
+}
+type BuyOrderStage = "create" | "confirm" | "finalize";
+declare class BuyOrderError extends SteamError {
+  readonly stage: BuyOrderStage;
+  readonly code: number | undefined;
+  readonly mayExist: boolean;
+  readonly orderExists: boolean;
+  readonly confirmationId: string | undefined;
+  constructor(message: string, options: {
+    stage: BuyOrderStage;
+    mayExist: boolean;
+    orderExists?: boolean;
+    code?: number;
+    confirmationId?: string;
+    body?: unknown;
+    cause?: unknown;
   });
 }
 declare class WalletBalanceLimitError extends SteamError {
@@ -1478,6 +1539,33 @@ declare class SteamWebApi {
   getBadges(steamId: string): Promise<PlayerBadges>;
 }
 //#endregion
+//#region src/market/fees.d.ts
+interface MarketFeeInfo {
+  walletFee: boolean;
+  walletFeePercent: number;
+  walletFeeMinimum: number;
+  walletFeeBase: number;
+  publisherFeePercent: number;
+}
+interface MarketFeeBreakdown {
+  amount: number;
+  steamFee: number;
+  publisherFee: number;
+  fees: number;
+}
+declare const DEFAULT_MARKET_FEE_INFO: MarketFeeInfo;
+declare function feeInfoFromWalletInfo(raw: {
+  wallet_fee?: unknown;
+  wallet_fee_percent?: unknown;
+  wallet_fee_minimum?: unknown;
+  wallet_fee_base?: unknown;
+  wallet_publisher_fee_percent_default?: unknown;
+}, publisherFeePercent?: number): MarketFeeInfo | null;
+declare function buyerPaysForSellerReceives(receivedAmount: number, info: MarketFeeInfo): MarketFeeBreakdown;
+declare function feesForBuyerPays(amount: number, info: MarketFeeInfo): MarketFeeBreakdown;
+declare function sellerReceivesForBuyerPays(amount: number, info: MarketFeeInfo): number;
+declare function landingBuyerPays(targetBuyerPays: number, info: MarketFeeInfo): number;
+//#endregion
 //#region src/market/history.d.ts
 type MarketHistoryEventType = "sale" | "purchase" | "listing_event";
 interface MarketHistoryEvent {
@@ -1512,30 +1600,42 @@ interface MarketListingEvent extends MarketHistoryEvent {
   type: "listing_event";
 }
 type MarketHistoryRow = MarketSale | MarketPurchase | MarketListingEvent;
+interface MarketHistoryMalformedRow {
+  historyId: string;
+  displayPrice: string;
+  gainOrLoss: string;
+  reason: "zero_price" | "missing_price" | "other_currency";
+}
 interface MarketHistory {
   events: MarketHistoryRow[];
   sales: MarketSale[];
   purchases: MarketPurchase[];
   listingEvents: MarketListingEvent[];
+  malformed: MarketHistoryMalformedRow[];
   totalCount: number | undefined;
 }
 declare function parseMarketHistory(body: RawMarketHistoryResponse): MarketHistory;
+declare function priceTextCurrency(text: string): number | undefined;
 //#endregion
 //#region src/market/MarketNamespace.d.ts
+type MarketCallOptions = RequestControl;
 interface MyListings {
   listings: RawMarketListing[];
   listings_to_confirm: RawMarketListing[];
+  listings_on_hold: RawMarketListing[];
   buy_orders: RawMarketBuyOrder[];
   num_active_listings: number;
+  complete: boolean;
 }
-interface SellItemOptions {
+interface SellItemOptions extends MarketCallOptions {
   appid: number;
   contextid?: string;
   assetid: string;
   amount?: number;
   price: number;
+  currency?: number;
 }
-interface CreateBuyOrderOptions {
+interface CreateBuyOrderOptions extends MarketCallOptions {
   appid: number;
   marketHashName: string;
   priceTotal: number;
@@ -1546,34 +1646,64 @@ interface ConfirmListingsResult {
   confirmed: Confirmation[];
   skipped: Confirmation[];
 }
+interface ConfirmListingIdsResult {
+  confirmed: Confirmation[];
+  missing: string[];
+}
+interface OrderbookSummary {
+  currency: number;
+  lowestAsk: number | null;
+  askVolumeAtLowest: number;
+  secondLowestAsk: number | null;
+  highestBid: number | null;
+  bidVolumeAtHighest: number;
+  secondHighestBid: number | null;
+}
 declare class MarketNamespace {
   private readonly http;
   private readonly session;
   private readonly confirmations;
   private readonly api;
-  walletCurrency: number | undefined;
+  private currency;
+  private currencyVerified;
   constructor(http: HttpClient, session: SessionManager, confirmations: ConfirmationManager, api: WebApiClient);
-  getWalletDetails(): Promise<RawWalletDetails>;
+  get walletCurrency(): number | undefined;
+  get walletCurrencyVerified(): boolean;
+  seedWalletCurrency(currency: number): void;
+  getWalletDetails(options?: MarketCallOptions): Promise<RawWalletDetails>;
+  getMarketWalletInfo(options?: MarketCallOptions): Promise<RawMarketWalletInfo>;
   getMyListings(options?: {
-    currency?: number;
-  }): Promise<MyListings>;
+    currency?: number | null;
+  } & MarketCallOptions): Promise<MyListings>;
   getMyHistory(options?: {
     count?: number;
     start?: number;
-  }): Promise<MarketHistory>;
+    currency?: number | null;
+  } & MarketCallOptions): Promise<MarketHistory>;
   getOrderbook(appid: number, marketHashName: string, options?: {
-    expectedCurrency?: number;
-  }): Promise<RawOrderbookData>;
-  getPriceHistory(appid: number, marketHashName: string): Promise<RawPriceHistoryPoint[]>;
-  getMarketItemDetails(appid: number, marketHashName: string): Promise<RawMarketSearchResult | null>;
+    expectedCurrency?: number | null;
+  } & MarketCallOptions): Promise<RawOrderbookData>;
+  getPriceHistory(appid: number, marketHashName: string, options?: {
+    expectedCurrency?: number | null;
+  } & MarketCallOptions): Promise<RawPriceHistoryPoint[]>;
+  getMarketItemDetails(appid: number, marketHashName: string, options?: MarketCallOptions): Promise<RawMarketSearchResult | null>;
   sellItem(options: SellItemOptions): Promise<RawSellItemResponse>;
-  cancelListing(listingId: string): Promise<void>;
+  cancelListing(listingId: string, options?: MarketCallOptions): Promise<void>;
   createBuyOrder(options: CreateBuyOrderOptions): Promise<string>;
-  cancelBuyOrder(buyOrderId: string): Promise<RawCancelBuyOrderResponse>;
-  confirmListings(expected: Record<string, number>): Promise<ConfirmListingsResult>;
-  rejectListings(types?: EConfirmationType[]): Promise<Confirmation[]>;
+  cancelBuyOrder(buyOrderId: string, options?: MarketCallOptions): Promise<RawCancelBuyOrderResponse>;
+  confirmListingIds(listingIds: string[], options?: MarketCallOptions): Promise<ConfirmListingIdsResult>;
+  confirmListings(expected: Record<string, number>, options?: MarketCallOptions): Promise<ConfirmListingsResult>;
+  rejectListings(types?: EConfirmationType[], options?: {
+    keepCreators?: string[];
+  } & MarketCallOptions): Promise<Confirmation[]>;
+  private acceptBuyOrderConfirmation;
   private postBuyOrder;
+  private readCurrency;
+  private writeCurrency;
+  private learnCurrency;
+  private confirmCurrency;
 }
+declare function summarizeOrderbook(data: RawOrderbookData): OrderbookSummary;
 //#endregion
 //#region src/market/prices.d.ts
 declare function getPriceValueAsInt(strAmount: string | null | undefined): number;
@@ -1817,6 +1947,7 @@ interface SteamMobileOptions {
   proxy?: string;
   mobileProfile?: MobilePlatform | Partial<MobileProfile>;
   polling?: boolean | PollOptions;
+  walletCurrency?: number;
 }
 type ReauthenticateOptions = Omit<LoginWithCredentialsOptions, "proxy" | "mobileProfile">;
 declare class SteamMobile extends EventEmitter<SteamMobileEvents> {
@@ -1906,5 +2037,5 @@ declare class Poller {
   private stamp;
 }
 //#endregion
-export { ANDROID_PROFILE, type AcceptResult, AccessTokenError, type ApiCallParams, type AssetProperty, AuthClient, type Badge, CommunityNamespace, type ConfirmListingsResult, type Confirmation, ConfirmationError, ConfirmationManager, type CreateBuyOrderOptions, CredentialSession, type CredentialSessionEvents, type CredentialStartOptions, DEFAULT_CONTEXTID, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, type EconItem, EscrowError, type EscrowHold, type EscrowSide, type ExchangeDetails, type ExchangeItem, FamilyViewError, type GetInventoryOptions, HttpClient, type HttpResponse, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, type JwtPayload, LANG, LoginError, type LoginResult, type LoginWithCredentialsOptions, MarketBlockedError, MarketConfirmationLimitError, type MarketHistory, type MarketHistoryEvent, type MarketHistoryEventType, type MarketHistoryRow, type MarketListingEvent, MarketNamespace, type MarketPurchase, type MarketSale, type MobilePlatform, type MobileProfile, type MyListings, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OfferTarget, OpenIdError, type OpenidConfirmation, type OpenidCookie, type OpenidLoginOptions, type OpenidLoginResult, type PlayerBadges, type PlayerBans, type PlayerSummary, type PollChange, type PollData, type PollDataStore, type PollOptions, type PollSource, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, type RateLimit, RateLimitError, type RateLimitedEndpoint, RawAsset, type RawAssetPropertyEntry, RawCEconTradeOffer, RawCancelBuyOrderResponse, RawCreateBuyOrderResponse, type RawDescription, RawExchangeAsset, RawGetTradeOffersResponse, RawGetTradeStatusResponse, type RawInventoryAsset, type RawInventoryResponse, RawMarketBuyOrder, RawMarketHistoryAsset, RawMarketHistoryResponse, RawMarketListing, RawMarketListingAsset, RawMarketSearchResponse, RawMarketSearchResult, RawMyListingsResponse, RawOrderbookData, type RawPartnerInventoryResponse, RawPriceHistoryPoint, RawPriceHistoryResponse, RawSellItemResponse, RawTradeStatus, RawTwoFactorStatus, RawWalletDetails, type ReauthenticateOptions, type RequestOptions, type ResolvedTarget, type SellItemOptions, type SendResult, SessionManager, type SessionManagerEvents, type SteamAction, type SteamDescriptionLine, SteamError, SteamMobile, type SteamMobileEvents, type SteamMobileOptions, type SteamProfile, SteamSessionExpiredError, type SteamTag, SteamWebApi, type SteamWebApiOptions, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, ThrottledError, TradeBanError, type TradeEvents, type TradeHistory, type TradeHistoryEntry, type TradeHistoryOptions, TradeItem, TradeNamespace, TradeOffer, type TradeOfferDeps, type TradeOfferUpdate, type TradeOffersSummary, URLS, type UserDetails, type UserPartnerDetails, type UserSideDetails, WalletBalanceLimitError, WebApiClient, WebTradeEligibility, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, getPriceValueAsInt, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, loginWithCredentials, parseInventory, parseMarketHistory, parseOpenidForm, parsePartnerInventory, resolveMobileProfile, resolveTarget, secondsUntilExpiry, steamOpenidLogin };
+export { ANDROID_PROFILE, type AcceptResult, AccessTokenError, type ApiCallParams, type AssetProperty, AuthClient, type Badge, BuyOrderError, BuyOrderStage, CommunityNamespace, type ConfirmListingIdsResult, type ConfirmListingsResult, type Confirmation, ConfirmationError, ConfirmationManager, ConfirmationOutcomeUnknownError, type CreateBuyOrderOptions, CredentialSession, type CredentialSessionEvents, type CredentialStartOptions, CurrencyMismatchError, DEFAULT_CONTEXTID, DEFAULT_MARKET_FEE_INFO, DEFAULT_POLL_FULL_UPDATE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_POLL_MAX_AGE_MS, DEFAULT_RATE_LIMIT_RETRY_MS, EAuthSessionGuardType, EAuthTokenPlatformType, EAuthTokenRevokeAction, EConfirmationMethod, EConfirmationType, EOfferFilter, EResult, ESessionPersistence, ETokenRenewalType, ETradeOfferState, ETradeStatus, type EconItem, EscrowError, type EscrowHold, type EscrowSide, type ExchangeDetails, type ExchangeItem, FamilyViewError, type GetInventoryOptions, HttpClient, type HttpResponse, HttpStatusError, IOS_PROFILE, ItemServerUnavailableError, type JwtPayload, LANG, LoginError, type LoginResult, type LoginWithCredentialsOptions, MarketBlockedError, type MarketCallOptions, MarketConfirmationLimitError, MarketConfirmationLimitReason, type MarketFeeBreakdown, type MarketFeeInfo, type MarketHistory, type MarketHistoryEvent, type MarketHistoryEventType, type MarketHistoryMalformedRow, type MarketHistoryRow, MarketIneligibleError, MarketItemUnavailableError, type MarketListingEvent, MarketNamespace, type MarketPurchase, type MarketSale, type MobilePlatform, type MobileProfile, type MyListings, NewDeviceError, NoMobileAuthenticatorError, OfferLimitError, OfferTarget, OpenIdError, type OpenidConfirmation, type OpenidCookie, type OpenidLoginOptions, type OpenidLoginResult, type OrderbookSummary, type PlayerBadges, type PlayerBans, type PlayerSummary, type PollChange, type PollData, type PollDataStore, type PollOptions, type PollSource, Poller, PrivateInventoryError, ProxyError, RATE_LIMITS, RETRY_AFTER, type RateLimit, RateLimitError, type RateLimitedEndpoint, RawAsset, type RawAssetPropertyEntry, RawCEconTradeOffer, RawCancelBuyOrderResponse, RawCreateBuyOrderResponse, type RawDescription, RawExchangeAsset, RawGetTradeOffersResponse, RawGetTradeStatusResponse, type RawInventoryAsset, type RawInventoryResponse, RawMarketBuyOrder, RawMarketHistoryAsset, RawMarketHistoryResponse, RawMarketListing, RawMarketListingAsset, RawMarketSearchResponse, RawMarketSearchResult, RawMarketWalletInfo, RawMyListingsResponse, RawOrderbookData, type RawPartnerInventoryResponse, RawPriceHistoryPoint, RawPriceHistoryResponse, RawSellItemResponse, RawTradeStatus, RawTwoFactorStatus, RawWalletDetails, type ReauthenticateOptions, type RequestControl, type RequestOptions, type ResolvedTarget, type SellItemOptions, type SendResult, SessionManager, type SessionManagerEvents, type SteamAction, type SteamDescriptionLine, SteamError, SteamMobile, type SteamMobileEvents, type SteamMobileOptions, type SteamProfile, SteamSessionExpiredError, type SteamTag, SteamWebApi, type SteamWebApiOptions, TERMINAL_AUTH_ERESULTS, TRANSIENT_ERESULTS, TargetCannotTradeError, ThrottledError, TradeBanError, type TradeEvents, type TradeHistory, type TradeHistoryEntry, type TradeHistoryOptions, TradeItem, TradeNamespace, TradeOffer, type TradeOfferDeps, type TradeOfferUpdate, type TradeOffersSummary, URLS, type UserDetails, type UserPartnerDetails, type UserSideDetails, WalletBalanceLimitError, WalletCurrencyUnknownError, WebApiClient, WebTradeEligibility, buyerPaysForSellerReceives, confirmOpenid, decodeJwt, decodePreviewToken, encodePreviewToken, feeInfoFromWalletInfo, feesForBuyerPays, getPriceValueAsInt, getTradeHistory, getTradeOffersSummary, getTradeStatus, isTerminalAuthEResult, isTerminalState, isTransientEResult, landingBuyerPays, loginWithCredentials, parseInventory, parseMarketHistory, parseOpenidForm, parsePartnerInventory, priceTextCurrency, resolveMobileProfile, resolveTarget, secondsUntilExpiry, sellerReceivesForBuyerPays, steamOpenidLogin, summarizeOrderbook };
 //# sourceMappingURL=index.d.mts.map

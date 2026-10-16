@@ -1,6 +1,6 @@
 {
   "name": "@assetpay/steam-mobile",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "Headless Steam mobile-app client (web-based, no CM) for trading.",
   "author": {
@@ -64,7 +64,8 @@
     "partner-inventory": "tsx debug/partnerInventory.ts",
     "own-inventory": "tsx debug/ownInventory.ts",
     "trade-eligibility": "tsx debug/webTradeEligibility.ts",
-    "market-probe": "tsx debug/marketProbe.ts"
+    "market-probe": "tsx debug/marketProbe.ts",
+    "market-trade": "tsx debug/marketTrade.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.1",

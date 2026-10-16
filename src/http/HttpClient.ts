@@ -47,6 +47,21 @@ export interface RequestOptions {
   referer?: string;
   signal?: AbortSignal; // abort the request
   timeoutMs?: number; // per-request timeout override (default 50000)
+  // Don't re-send this request after priming Steam's market eligibility check; return the redirect
+  // instead. For writes whose replay must never happen implicitly.
+  noEligibilityReplay?: boolean;
+}
+
+// The per-call controls a caller can thread through higher-level methods.
+export type RequestControl = Pick<RequestOptions, "signal" | "timeoutMs">;
+
+export function requestControl(
+  control: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined } | undefined,
+): RequestControl {
+  const out: RequestControl = {};
+  if (control?.signal) out.signal = control.signal;
+  if (control?.timeoutMs !== undefined) out.timeoutMs = control.timeoutMs;
+  return out;
 }
 
 function clean(input?: Record<string, Scalar | undefined>): Record<string, string> | undefined {
@@ -122,7 +137,8 @@ export class HttpClient {
       res.statusCode < 400 &&
       location?.includes("/market/eligibilitycheck")
     ) {
-      await this.perform("GET", location, opts.signal ? { signal: opts.signal } : {});
+      await this.perform("GET", location, requestControl(opts));
+      if (opts.noEligibilityReplay) return res;
       return this.perform<T>(method, url, opts);
     }
     return res;

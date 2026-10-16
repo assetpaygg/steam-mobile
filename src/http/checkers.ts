@@ -1,6 +1,7 @@
 import {
   FamilyViewError,
   HttpStatusError,
+  MarketIneligibleError,
   RateLimitError,
   SteamError,
   SteamSessionExpiredError,
@@ -28,7 +29,7 @@ export function httpError(
     const loc = locationHeader(res);
     if (loc.includes("/login")) return new SteamSessionExpiredError();
     if (loc.includes("eligibilitycheck")) {
-      return new SteamError(
+      return new MarketIneligibleError(
         "Steam redirected to the market eligibility check — this account is limited / not trade-eligible",
       );
     }

@@ -39,7 +39,7 @@ persistent CM connection.
 - [bot.trade](#bottrade) — sending, reading, and polling trade offers
 - [TradeOffer](#tradeoffer) — a single offer
 - [bot.community](#botcommunity) — inventories, profiles, trade URLs, API keys
-- [bot.market](#botmarket) — Community Market: listings, buy orders, history, order book
+- [bot.market](#botmarket) — Community Market: listings, buy orders, history, order book, fees
 - [bot.session](#botsession) — token lifecycle and sessions
 - [bot.confirmations](#botconfirmations) — low-level mobile confirmations
 - [decodePreviewToken](#decodepreviewtoken) — decode CS2 item inspect/certificate data
@@ -175,6 +175,7 @@ The root client. It owns the HTTP layer, the session, and the namespaces, and it
   - `proxy` — Optional. A proxy URL (`http://user:pass@host:port`, `socks5://…`, etc.). All traffic — API, community, and confirmations — routes through it.
   - `mobileProfile` — Optional. `"ios"` (default), `"android"`, or a `Partial<MobileProfile>` to override individual fields. See [Mobile-app impersonation](#mobile-app-impersonation).
   - `polling` — Optional. `true` to start polling with default cadence after `login()`, or a [`PollOptions`](#polloptions) object to tune it / resume from saved `pollData`.
+  - `walletCurrency` — Optional. The account's known wallet currency id (`1` USD, `3` EUR, …), e.g. persisted from an earlier `getWalletDetails()`. Market calls check against it from the first request; see [bot.market](#botmarket).
 
 Throws `SteamSessionExpiredError` synchronously if the refresh token is malformed (no SteamID in its
 payload). Does **not** make any network request.
@@ -711,84 +712,131 @@ for completeness. Returns `Promise<void>`.
 
 The Steam Community Market. Needs an account that can use the market (not limited). Responses are
 returned as Steam sends them (snake_case, unknown fields preserved); nothing is retried — rate limits
-surface as `RateLimitError` (HTTP 429), and the order book's 403 wall as `ThrottledError`.
+surface as `RateLimitError` (HTTP 429), and the order book's 403 wall as `ThrottledError`. Every
+method takes optional controls on its options object: `signal` (an `AbortSignal` — use
+`AbortSignal.timeout(ms)` for a deadline on the whole call) and `timeoutMs` (per HTTP request; the
+default is 50s). Writes are never re-sent implicitly, not even after Steam's eligibility check.
 
-**Currency.** `bot.market.walletCurrency` (`1` USD, `3` EUR, …) is learned by
-[`getWalletDetails()`](#getwalletdetails) or set by you. Once known it is sent with
-`getMyListings` / `createBuyOrder` and **enforced on every `getOrderbook`** — a book in another
-currency throws instead of being compared. Call `getWalletDetails()` first on each account.
+**Currency — fails closed.** `bot.market.walletCurrency` (`1` USD, `3` EUR, …) is seeded through
+`new SteamMobile({ walletCurrency })` / `bot.market.seedWalletCurrency()`, or learned by
+[`getWalletDetails()`](#getwalletdetails) from a wallet that exists. Once known it can only be
+confirmed: a response in another currency throws `CurrencyMismatchError` instead of switching.
+`bot.market.walletCurrencyVerified` turns true once a live read in this session answered in it
+(the wallet, an order book, your buy orders or listings) — writes require it, so a wrong seed can't
+price a write. Every currency-dependent call checks it:
 
-### getWalletDetails()
+- `getMyListings`, `getMyHistory`, `getOrderbook`, `getPriceHistory` throw
+  `WalletCurrencyUnknownError` when no currency is known, and `CurrencyMismatchError` when a response
+  is in another currency (order book `eCurrency`, buy orders' `wallet_currency`, listings'
+  `currencyid`, the price-history `price_prefix` / `price_suffix`). The rendered history is the
+  exception: a row priced in another currency (an account that changed currency keeps its old rows)
+  is moved to `malformed` with reason `other_currency`, never returned as money, and the rest of the
+  page is returned. Passing `null` as the currency option skips the check for that call. History and
+  price-history formats are pinned for USD and EUR only.
+- `sellItem` and `createBuyOrder` need the wallet currency known and verified, and refuse a
+  `currency` option that differs from it.
+
+### getWalletDetails(\[options])
 
 Returns the wallet via `IUserAccountService/GetClientWalletDetails` as `Promise<RawWalletDetails>`:
 `has_wallet`, `balance` / `delayed_balance` (int64 cents, as strings), `currency_code` (the wallet
 currency id — `1` USD, `3` EUR, …), `user_country_code`, `time_most_recent_txn`,
-`formatted_balance`, and the rest of Steam's fields. Sets `walletCurrency`.
+`formatted_balance`, and the rest of Steam's fields. Learns `walletCurrency`.
+
+### getMarketWalletInfo(\[options])
+
+Returns `g_rgWalletInfo` from the market page as `Promise<RawMarketWalletInfo>`: the fee parameters
+(`wallet_fee`, `wallet_fee_percent`, `wallet_fee_minimum`, `wallet_fee_base`,
+`wallet_publisher_fee_percent_default`) and caps (`wallet_max_balance`, `wallet_trade_max_balance`)
+in the wallet currency. Throws `SteamSessionExpiredError` unless the page was rendered for this
+account (a logged-out page carries a default USD wallet). It never teaches the currency; a known
+one must match. `feeInfoFromWalletInfo(info)` turns it into a validated `MarketFeeInfo`.
 
 ### getMyListings(\[options])
 
 - `options`
-  - `currency` — Optional. Wallet currency id, sent as `currency` (default `walletCurrency`).
+  - `currency` — Optional. Wallet currency id, sent as `currency` (default `walletCurrency`; `null`
+    sends none and skips the checks).
 
 Loads every page of your listings. Returns `Promise<MyListings>`:
-`{ listings, listings_to_confirm, buy_orders, num_active_listings }` with Steam's raw entries. A
+`{ listings, listings_to_confirm, listings_on_hold, buy_orders, num_active_listings, complete }` with
+Steam's raw entries, listings deduplicated by `listingid`. Every listing must carry its `currencyid`
+and every buy order its `wallet_currency`. `complete` is `false` when the pages did not add up to
+`num_active_listings`, the total moved between pages, or the first page had no `buy_orders` array —
+never read "absent from an incomplete result" as sold, cancelled or filled. A
 listing's `price` is what you receive and `fee` Steam's cut (the buyer pays `price + fee`).
 `listings_to_confirm` are listings still awaiting mobile confirmation; their item can't be relisted
-until the listing is confirmed or removed with [`cancelListing`](#cancellistinglistingid).
+until the listing is confirmed or removed with [`cancelListing`](#cancellistinglistingid-options).
 
 ### getMyHistory(\[options])
 
 - `options`
   - `count` — Optional. Rows per page (default `500`).
   - `start` — Optional. Row offset, for paging back.
+  - `currency` — Optional. Currency a priced row must be in to be returned as money (default
+    `walletCurrency`; `null` skips). Rows in any other currency go to `malformed` as `other_currency`.
 
 Parses the rendered market history into `Promise<MarketHistory>`:
-`{ events, sales, purchases, listingEvents, totalCount }` — `events` is every row in page order
-(newest first), the others split it by `type`. Every event has `historyId`
+`{ events, sales, purchases, listingEvents, malformed, totalCount }` — `events` is every row in page
+order (newest first), the others split it by `type`. Every event has `historyId`
 (`history_row_<listingid>_<eventid>`), `listingid`, `eventid`, `type`, `itemName`, `gameName`, `actedOn` /
 `listedOn` (display dates, no year), `displayPrice` and `priceInCents` (also as `receivedAmount` on
 sales and `paidAmount` on purchases). Sales and purchases also carry the asset: `appID`,
 `contextID`, `assetID`, `classID`, `instanceID`, `marketName`, `unOwnedContextID`, `unOwnedID`.
-Throws if a real price string parses to 0 cents. `parseMarketHistory(body)` is exported for raw
-responses.
+A sale or purchase whose price is missing or parses to 0 cents is kept out of every list and returned
+in `malformed` (`historyId`, `displayPrice`, `gainOrLoss`, `reason`: `"zero_price"` |
+`"missing_price"` | `"other_currency"`) — record it, never book it.
+`parseMarketHistory(body)` and `priceTextCurrency(text)` are exported for raw responses.
 
 ### getOrderbook(appid, marketHashName\[, options])
 
 - `options`
-  - `expectedCurrency` — Optional (default `walletCurrency`). Throw instead of returning a book in
-    any other currency.
+  - `expectedCurrency` — Optional (default `walletCurrency`; `null` skips). Throws
+    `CurrencyMismatchError` instead of returning a book in any other currency.
 
 Returns the live order book as `Promise<RawOrderbookData>`: `eCurrency`, `amtMinSellOrder` /
 `amtMaxBuyOrder` (best ask / bid in cents, `null` — not `NaN` — when that side is empty), and
 `rgCompactSellOrders` / `rgCompactBuyOrders` (flat `[price, qty, price, qty, …]`, best first). The
 endpoint always answers in the wallet currency. A 403 here is Steam's order-book throttle wall and
-throws `ThrottledError`.
+throws `ThrottledError`. `summarizeOrderbook(data)` reads the best levels —
+`{ currency, lowestAsk, askVolumeAtLowest, secondLowestAsk, highestBid, bidVolumeAtHighest,
+secondHighestBid }`, an empty side as `null` (never a 0-cent price) — fail-closed: every value must be
+a whole number, levels strictly ordered with positive prices and quantities, and the best level must
+match the depth; anything else throws.
 
-### getPriceHistory(appid, marketHashName)
+### getPriceHistory(appid, marketHashName\[, options])
+
+- `options`
+  - `expectedCurrency` — Optional (default `walletCurrency`; `null` skips).
 
 Returns the price history rows as `Promise<RawPriceHistoryPoint[]>` —
 `[date, price (major units), volume]`; `[]` for an item without sales history. Throws when Steam
-answers `success: false`.
+answers `success: false`, and `CurrencyMismatchError` when the response's currency markers don't
+match.
 
-### getMarketItemDetails(appid, marketHashName)
+### getMarketItemDetails(appid, marketHashName\[, options])
 
 Searches the market and returns the row whose `hash_name` matches exactly (`sell_listings`,
-`asset_description`), or `null`.
+`asset_description`), or `null`. A `success: false` answer throws, so a throttled reply is never read
+as "not on the market".
 
 ### sellItem(options)
 
 - `options`
   - `appid`, `assetid`
-  - `price` — What **you** receive, in cents (the buyer pays this plus fees).
+  - `price` — What **you** receive, in cents (the buyer pays this plus fees). Positive integer.
   - `contextid` — Optional (default `"2"`).
   - `amount` — Optional (default `1`).
+  - `currency` — Optional. The currency `price` is in; must equal `walletCurrency`.
 
 Lists an item and returns Steam's response as `Promise<RawSellItemResponse>`. The listing still needs
-its mobile confirmation — see [`confirmListings`](#confirmlistingsexpected). Refusals throw
-`MarketConfirmationLimitError`, `WalletBalanceLimitError` or `MarketBlockedError`, otherwise a
-`SteamError` with Steam's message.
+its mobile confirmation — see [`confirmListingIds`](#confirmlistingidslistingids-options). Refusals
+throw `MarketConfirmationLimitError` (with `reason`: `"too_many_pending"` | `"item_pending"` |
+`"unknown"`), `WalletBalanceLimitError`, `MarketBlockedError`, `MarketItemUnavailableError`, otherwise
+a `SteamError` with Steam's message. A transport failure leaves the outcome unknown: read
+`getMyListings` before listing the asset again.
 
-### cancelListing(listingId)
+### cancelListing(listingId\[, options])
 
 Removes a listing. Returns `Promise<void>`.
 
@@ -796,35 +844,78 @@ Removes a listing. Returns `Promise<void>`.
 
 - `options`
   - `appid`, `marketHashName`, `quantity`
-  - `priceTotal` — Price per unit × quantity, in cents.
-  - `currency` — Optional. Wallet currency id (default `walletCurrency`; throws if neither is known).
+  - `priceTotal` — Price per unit × quantity, in cents (must divide by `quantity`).
+  - `currency` — Optional. Must equal `walletCurrency`, which must be known.
 
-Places a buy order and returns its `buy_orderid` as `Promise<string>`. When Steam answers with a
-mobile confirmation (HTTP 406), it is accepted (needs `identitySecret`) and the order finalized. A
-refusal is a `SteamError` whose `eresult` is Steam's code. Not retried: the confirmation id carries
-between steps, so re-run the whole call — but a failure after the confirmation was accepted may
-still have placed the order, so check [`getMyListings`](#getmylistingsoptions) first.
+Places a buy order and returns its `buy_orderid` as `Promise<string>` (64-bit ids are read from the
+raw response, never through a JS number). When Steam answers with a mobile confirmation (HTTP 406),
+exactly that confirmation is accepted (needs `identitySecret`) and the order finalized. No step is
+ever retried. Errors:
 
-### cancelBuyOrder(buyOrderId)
+- `RateLimitError`, `SteamSessionExpiredError`, `MarketIneligibleError` from the first request —
+  nothing was placed.
+- `MarketBlockedError` (Steam code 15 or "unable to use the Community Market", any step) — refused;
+  account-level.
+- `BuyOrderError` for everything else: `stage` (`"create"` | `"confirm"` | `"finalize"`), `code`
+  (Steam's `success` code), `confirmationId`, **`orderExists`** (Steam says an order for this item
+  already exists — 29 — possibly at another price) and **`mayExist`** — `true` unless Steam refused
+  with a code proven to mean "not placed" (25 order limit, 107 insufficient funds) and nothing in its
+  message says the outcome is unknown ("trouble hearing back… double check…"). Read `getMyListings`
+  before acting again whenever it is `true`.
 
-Cancels a buy order and returns Steam's response as `Promise<RawCancelBuyOrderResponse>`.
+Only a confirmation of type `BuyOrder` whose creator is the order's `confirmation_id` is ever accepted.
 
-### confirmListings(expected)
+### cancelBuyOrder(buyOrderId\[, options])
+
+Cancels a buy order. Returns Steam's response as `Promise<RawCancelBuyOrderResponse>` when it reports
+success; any other verdict throws a `SteamError` with Steam's code as `eresult`.
+
+### confirmListingIds(listingIds\[, options])
+
+Accepts exactly the pending market-listing confirmations created by those listing ids (a listing
+confirmation's `creator` is its listing id), in one request. Returns
+`Promise<{ confirmed, missing }>` — `missing` lists ids with no pending confirmation. Nothing else is
+ever confirmed.
+
+### confirmListings(expected\[, options])
 
 - `expected` — `{ [market_hash_name]: number of listings created }`.
 
-Accepts the pending market-listing confirmations that match, in one request: oldest first, exact name
-first, then a substring match (the confirmation text can omit the wear; an empty one never matches). Returns
-`Promise<{ confirmed, skipped }>` ([`Confirmation`](#confirmation)`[]` each); unmatched ones stay
-pending in `skipped`.
+Name-based fallback: accepts the pending market-listing confirmations that match, in one request:
+oldest first, exact name first, then a substring match (the confirmation text can omit the wear; an
+empty one never matches). It cannot tell two listings of one name apart and never checks the price —
+prefer `confirmListingIds`. Returns `Promise<{ confirmed, skipped }>`
+([`Confirmation`](#confirmation)`[]` each); unmatched ones stay pending in `skipped`.
 
-### rejectListings(\[types])
+### rejectListings(\[types, options])
 
 - `types` — Optional [`EConfirmationType`](#econfirmationtype)`[]` (default `[MarketListing]`; pass
   `[BuyOrder]` for buy orders).
+- `options.keepCreators` — Optional. Creator ids (listing ids, buy-order confirmation ids) to leave
+  pending — work still in flight.
 
-Rejects every pending confirmation of those types in one request and returns them. Other types are
-never touched.
+Rejects every other pending confirmation of those types in one request and returns them. Other types
+are never touched.
+
+### Fees
+
+Steam's own fee math (its client's `CalculateFeeAmount` /
+`CalculateAmountToSendForDesiredReceivedAmount`), exact to the cent:
+
+- `sellerReceivesForBuyerPays(buyerPays, feeInfo)` — what a seller receives at a listed price.
+- `buyerPaysForSellerReceives(sellerReceives, feeInfo)` — `{ amount, steamFee, publisherFee, fees }`.
+- `feesForBuyerPays(buyerPays, feeInfo)` — the fee split of a listed price.
+- `landingBuyerPays(targetBuyerPays, feeInfo)` — the price a listing actually shows when listed to
+  receive `sellerReceivesForBuyerPays(target)`: not every price is reachable, so it can sit a cent or
+  two below the target; `0` when the target pays out nothing (1c, 2c).
+- `feeInfoFromWalletInfo(g_rgWalletInfo[, publisherFeePercent])` — a validated `MarketFeeInfo`, or
+  `null` when a field is missing or out of range.
+
+`feeInfo` is a `MarketFeeInfo` (`walletFee`, `walletFeePercent`, `walletFeeMinimum`, `walletFeeBase`,
+`publisherFeePercent`, all fractions — `0.05`, never `5`); build it from
+[`getMarketWalletInfo()`](#getmarketwalletinfo), or use `DEFAULT_MARKET_FEE_INFO` (5% + 10%, min 1c
+each — CS2 and Rust as of 2026-10). Non-integer or negative cents, and fee info out of range, throw
+`RangeError`.
 
 ---
 
@@ -1291,9 +1382,15 @@ one shared classifier so the same `instanceof` check works everywhere.
 | `PrivateInventoryError` | — | Partner's inventory is private (or friends-only and we're not friends). A trade URL/token does **not** bypass inventory privacy. |
 | `ConfirmationError` | — | A mobile-confirmation step failed (incl. missing `identitySecret` when calling [`offer.confirm()`](#confirm)). |
 | `FamilyViewError` | — | Family View is restricting the account. |
-| `MarketConfirmationLimitError` | `eresult?` | `sellItem` refused over pending confirmations: too many listings awaiting confirmation, or this item already has one pending. |
+| `MarketConfirmationLimitError` | `eresult?`, `reason` | `sellItem` refused over pending confirmations: `too_many_pending` (confirm some first) or `item_pending` (this item already has one pending). |
 | `WalletBalanceLimitError` | `eresult?` | `sellItem` would push the wallet past Steam's maximum balance. |
-| `MarketBlockedError` | `eresult?` | The account is currently unable to use the Community Market. |
+| `MarketBlockedError` | `eresult?` | The account is currently unable to use the Community Market (sell or buy). |
+| `MarketItemUnavailableError` | `eresult?` | `sellItem` refused: the asset is no longer in the inventory or is not marketable. |
+| `MarketIneligibleError` | — | Steam keeps redirecting to its market eligibility check: the account can't use the market (limited, new device, …). |
+| `CurrencyMismatchError` | `expected`, `actual` | A market response or a caller's price is in another currency than required; nothing was compared. |
+| `WalletCurrencyUnknownError` | — | A currency-dependent market call ran with no known wallet currency. |
+| `BuyOrderError` | `stage`, `code?`, `mayExist`, `orderExists`, `confirmationId?` | `createBuyOrder` failed at a step; `mayExist` says the order may have been placed anyway, `orderExists` that one exists for the item. |
+| `ConfirmationOutcomeUnknownError` | (extends `ConfirmationError`) | Acting on a confirmation got an unreadable answer: it may or may not have been accepted. |
 | `LoginError` | `extendedErrorMessage?`, `isTransient` | Credential-login failure; `isTransient` is `true` for a retryable blip (timeout / service unavailable) rather than bad credentials. |
 | `NoMobileAuthenticatorError` | (extends `LoginError`) | `sharedSecret` was supplied but the account has no mobile authenticator attached, so TOTP can't answer the guard challenge. Use `steamGuardCode` / `onSteamGuardRequired` with an email code instead. |
 
@@ -1373,4 +1470,5 @@ pnpm watch              # live trade-event watcher — send the bot a trade and 
 pnpm trade              # send → confirm → cancel lifecycle (gated: SEND=1 PARTNER_TRADE_URL=…; needs a non-limited bot)
 pnpm partner-inventory  # load a partner's inventory via /partnerinventory/ (PARTNER_TRADE_URL=…; surfaces PrivateInventoryError etc.)
 pnpm market-probe       # read-only market + account-status probe (PROBE_APPID / PROBE_ITEM; needs a non-limited account)
+pnpm market-trade       # market write round trip → debug/out report (gated: LIVE_WRITES=1 PROBE_ASSETID=…; lists far above market, 3c buy order, cleans up)
 ```

@@ -138,6 +138,7 @@ export interface RawMyListingsResponse {
   listings?: RawMarketListing[];
   results?: { listings?: RawMarketListing[]; [key: string]: unknown };
   listings_to_confirm?: RawMarketListing[];
+  listings_on_hold?: RawMarketListing[];
   buy_orders?: RawMarketBuyOrder[];
   [key: string]: unknown;
 }
@@ -221,6 +222,25 @@ export interface RawCreateBuyOrderResponse {
 
 export interface RawCancelBuyOrderResponse {
   success?: boolean | number;
+  [key: string]: unknown;
+}
+
+// g_rgWalletInfo from a market page. Fee percents are numbers or numeric strings depending on the
+// page; amounts are integer cents in wallet_currency.
+export interface RawMarketWalletInfo {
+  wallet_currency?: number;
+  wallet_country?: string;
+  wallet_state?: string;
+  wallet_fee?: number | string;
+  wallet_fee_minimum?: number | string;
+  wallet_fee_percent?: number | string;
+  wallet_publisher_fee_percent_default?: number | string;
+  wallet_fee_base?: number | string;
+  wallet_balance?: number | string;
+  wallet_delayed_balance?: number | string;
+  wallet_max_balance?: number | string;
+  wallet_trade_max_balance?: number | string;
+  success?: number | boolean;
   [key: string]: unknown;
 }
 

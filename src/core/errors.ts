@@ -142,6 +142,15 @@ export class ConfirmationError extends SteamError {
   }
 }
 
+// Acting on a confirmation got an answer that says neither yes nor no (an unreadable body): it may
+// or may not have been accepted. Still a ConfirmationError for callers that only care it failed.
+export class ConfirmationOutcomeUnknownError extends ConfirmationError {
+  constructor(message = "Confirmation response unreadable; the outcome is unknown") {
+    super(message);
+    this.name = "ConfirmationOutcomeUnknownError";
+  }
+}
+
 export class FamilyViewError extends SteamError {
   constructor(message = "Family View Restricted") {
     super(message);
@@ -158,17 +167,106 @@ export class PrivateInventoryError extends SteamError {
   }
 }
 
-// sellitem refused over pending confirmations: too many listings awaiting mobile confirmation
-// (confirm them, then retry), or this item already has a listing pending confirmation — if no
-// confirmation exists for it any more, that listing is stuck until removed (cancelListing on its
-// listings_to_confirm entry).
+// too_many_pending: too many listings await mobile confirmation (confirm them, then retry).
+// item_pending: this item already has a listing pending confirmation — if no confirmation exists for
+// it any more, that listing is stuck until removed (cancelListing on its listings_to_confirm entry).
+export type MarketConfirmationLimitReason = "too_many_pending" | "item_pending" | "unknown";
+
 export class MarketConfirmationLimitError extends SteamError {
+  readonly reason: MarketConfirmationLimitReason;
+
   constructor(
     message = "Too many listings pending confirmation",
-    options?: { eresult?: number; body?: unknown },
+    options?: { eresult?: number; body?: unknown; reason?: MarketConfirmationLimitReason },
   ) {
     super(message, options);
     this.name = "MarketConfirmationLimitError";
+    this.reason = options?.reason ?? "unknown";
+  }
+}
+
+// sellitem refused because the asset is not (or no longer) in the inventory, or not marketable.
+export class MarketItemUnavailableError extends SteamError {
+  constructor(message: string, options?: { eresult?: number; body?: unknown }) {
+    super(message, options);
+    this.name = "MarketItemUnavailableError";
+  }
+}
+
+// Steam redirected a market request to its eligibility check and kept doing so after priming: the
+// account cannot use the Community Market (limited, new device, recent password reset, …).
+export class MarketIneligibleError extends SteamError {
+  constructor(
+    message = "Steam redirected to the market eligibility check — this account cannot use the market",
+  ) {
+    super(message);
+    this.name = "MarketIneligibleError";
+  }
+}
+
+// A market response (or a caller's price) is in a different currency than the one required. Prices
+// in different currencies must never be compared, so the call is refused instead.
+export class CurrencyMismatchError extends SteamError {
+  readonly expected: number;
+  readonly actual: number | undefined;
+
+  constructor(expected: number, actual: number | undefined, context: string) {
+    super(`Currency mismatch in ${context}: expected ${expected}, got ${actual ?? "unknown"}`);
+    this.name = "CurrencyMismatchError";
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+// The wallet currency is not known (not seeded, not yet read by getWalletDetails(), or the account
+// has no wallet), so a currency-dependent market call refuses to run.
+export class WalletCurrencyUnknownError extends SteamError {
+  constructor(context: string) {
+    super(
+      `Wallet currency unknown for ${context} — seed walletCurrency or call getWalletDetails() first`,
+    );
+    this.name = "WalletCurrencyUnknownError";
+  }
+}
+
+// createBuyOrder failed at `stage`. mayExist: the order may have been placed anyway (an answer
+// that proves nothing, a request whose outcome is unknown, or an accepted confirmation) — read
+// getMyListings() before acting again. Only Steam's refusals proven to mean "not placed" (15 access
+// denied, 25 order limit, 107 insufficient funds) clear it. orderExists: Steam says an order for
+// this item already exists (29 duplicate) — possibly at another price. code: Steam's body.success.
+// confirmationId: the mobile confirmation involved, if any.
+export type BuyOrderStage = "create" | "confirm" | "finalize";
+
+export class BuyOrderError extends SteamError {
+  readonly stage: BuyOrderStage;
+  readonly code: number | undefined;
+  readonly mayExist: boolean;
+  readonly orderExists: boolean;
+  readonly confirmationId: string | undefined;
+
+  constructor(
+    message: string,
+    options: {
+      stage: BuyOrderStage;
+      mayExist: boolean;
+      orderExists?: boolean;
+      code?: number;
+      confirmationId?: string;
+      body?: unknown;
+      cause?: unknown;
+    },
+  ) {
+    super(message, {
+      ...(options.code !== undefined ? { eresult: options.code } : {}),
+      body: options.body,
+      cause: options.cause,
+    });
+    this.name = "BuyOrderError";
+    this.stage = options.stage;
+    this.code = options.code;
+    this.orderExists = options.orderExists ?? false;
+    this.mayExist = options.mayExist || this.orderExists;
+    this.confirmationId = options.confirmationId;
   }
 }
 

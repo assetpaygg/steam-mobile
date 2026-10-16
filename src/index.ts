@@ -63,7 +63,7 @@ export {
 } from "./core/rateLimits.js";
 export { type ResolvedTarget, resolveTarget } from "./core/target.js";
 export * from "./core/types.js";
-export type { HttpResponse, RequestOptions } from "./http/HttpClient.js";
+export type { HttpResponse, RequestControl, RequestOptions } from "./http/HttpClient.js";
 export { HttpClient } from "./http/HttpClient.js";
 export type { ApiCallParams } from "./http/webApi.js";
 export { WebApiClient } from "./http/webApi.js";
@@ -76,21 +76,37 @@ export {
   type SteamWebApiOptions,
 } from "./keyApi/SteamWebApi.js";
 export {
+  buyerPaysForSellerReceives,
+  DEFAULT_MARKET_FEE_INFO,
+  feeInfoFromWalletInfo,
+  feesForBuyerPays,
+  landingBuyerPays,
+  type MarketFeeBreakdown,
+  type MarketFeeInfo,
+  sellerReceivesForBuyerPays,
+} from "./market/fees.js";
+export {
   type MarketHistory,
   type MarketHistoryEvent,
   type MarketHistoryEventType,
+  type MarketHistoryMalformedRow,
   type MarketHistoryRow,
   type MarketListingEvent,
   type MarketPurchase,
   type MarketSale,
   parseMarketHistory,
+  priceTextCurrency,
 } from "./market/history.js";
 export {
+  type ConfirmListingIdsResult,
   type ConfirmListingsResult,
   type CreateBuyOrderOptions,
+  type MarketCallOptions,
   MarketNamespace,
   type MyListings,
+  type OrderbookSummary,
   type SellItemOptions,
+  summarizeOrderbook,
 } from "./market/MarketNamespace.js";
 export { getPriceValueAsInt } from "./market/prices.js";
 export {

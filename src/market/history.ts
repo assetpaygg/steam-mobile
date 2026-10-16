@@ -1,4 +1,3 @@
-import { SteamError } from "../core/errors.js";
 import type { RawMarketHistoryAsset, RawMarketHistoryResponse } from "../core/types.js";
 import { getPriceValueAsInt } from "./prices.js";
 
@@ -45,12 +44,26 @@ export interface MarketListingEvent extends MarketHistoryEvent {
 
 export type MarketHistoryRow = MarketSale | MarketPurchase | MarketListingEvent;
 
+// A row whose money cannot be trusted (a real price string that parses to 0 cents). It is kept out
+// of sales/purchases/events so it can never book free money, and returned so the caller can record
+// it and alert instead of the whole page failing on every read while the row stays in view.
+export interface MarketHistoryMalformedRow {
+  historyId: string;
+  displayPrice: string;
+  gainOrLoss: string;
+  // zero_price: a price string that parses to 0. missing_price: a sale/purchase with no price at all.
+  // other_currency: priced in another currency than the wallet's (e.g. rows from before the account's
+  // currency changed), or in one whose markers are not recognized.
+  reason: "zero_price" | "missing_price" | "other_currency";
+}
+
 export interface MarketHistory {
   // Every row in page order (newest first) — the interleaving that sales/purchases alone lose.
   events: MarketHistoryRow[];
   sales: MarketSale[];
   purchases: MarketPurchase[];
   listingEvents: MarketListingEvent[];
+  malformed: MarketHistoryMalformedRow[];
   totalCount: number | undefined;
 }
 
@@ -62,6 +75,7 @@ export function parseMarketHistory(body: RawMarketHistoryResponse): MarketHistor
     sales: [],
     purchases: [],
     listingEvents: [],
+    malformed: [],
     totalCount: body.total_count,
   };
   if (!body.results_html) return history;
@@ -79,19 +93,23 @@ export function parseMarketHistory(body: RawMarketHistoryResponse): MarketHistor
     const rowId = attrValue(row.attrs, "id") ?? "";
 
     const priceInCents = getPriceValueAsInt(displayPrice);
-    // A real price string parsing to 0 would silently book free money — fail loud instead.
-    if (priceInCents === 0 && displayPrice) {
-      throw new SteamError(
-        `Market history price parsed to 0 cents for "${displayPrice}" in row ${rowId || "?"}`,
-      );
-    }
-
     const gainOrLoss = textOf(row.inner, "market_listing_gainorloss").trim();
     const type: MarketHistoryEventType =
       gainOrLoss === "-" ? "sale" : gainOrLoss === "+" ? "purchase" : "listing_event";
 
     const idMatch = rowId.match(/^history_row_(\d+)_(\d+)$/);
     if (!idMatch) continue;
+    // A real price string parsing to 0, or a sale/purchase carrying no price, would silently book
+    // free money — quarantine the row.
+    if (priceInCents === 0 && (displayPrice || type !== "listing_event")) {
+      history.malformed.push({
+        historyId: rowId,
+        displayPrice,
+        gainOrLoss,
+        reason: displayPrice ? "zero_price" : "missing_price",
+      });
+      continue;
+    }
     const event: MarketHistoryEvent = {
       historyId: rowId,
       listingid: idMatch[1]!,
@@ -256,4 +274,19 @@ function decodeEntities(s: string): string {
     }
     return NAMED_ENTITIES[ref.toLowerCase()] ?? whole;
   });
+}
+
+// The wallet currency a rendered price string is in, for the two currencies whose formats are pinned
+// here: USD "$1.23" (a bare $, not CDN$ / A$ / R$ …) → 1, EUR "1,23€" → 3. undefined = anything else.
+export function priceTextCurrency(text: string): number | undefined {
+  const t = text.trim();
+  if (t.includes("€")) return t.includes("$") ? undefined : 3;
+  const dollar = t.indexOf("$");
+  if (dollar === -1 || t.indexOf("$", dollar + 1) !== -1) return undefined;
+  // A letter right before or after the $ marks another dollar (CDN$, A$, NZ$, HK$, R$, S$, NT$,
+  // Mex$, $U).
+  if (/[A-Za-z]$/.test(t.slice(0, dollar)) || /^[A-Za-z]/.test(t.slice(dollar + 1))) {
+    return undefined;
+  }
+  return 1;
 }

@@ -2,7 +2,7 @@ import { URLS } from "../core/constants.js";
 import { EResult } from "../core/enums.js";
 import { RateLimitError, SteamError, SteamSessionExpiredError } from "../core/errors.js";
 import { httpError } from "./checkers.js";
-import type { HttpClient } from "./HttpClient.js";
+import { type HttpClient, requestControl } from "./HttpClient.js";
 
 type Scalar = string | number | boolean;
 
@@ -13,6 +13,8 @@ export interface ApiCallParams {
   version?: number;
   input?: Record<string, Scalar | undefined>;
   retryAfterMs?: number | null;
+  signal?: AbortSignal | undefined;
+  timeoutMs?: number | undefined;
 }
 
 type ApiBody = { response?: Record<string, unknown> } & Record<string, unknown>;
@@ -41,6 +43,7 @@ export class WebApiClient {
     }
 
     const res = await this.http.request<ApiBody>(httpMethod, url, {
+      ...requestControl(params),
       responseType: "json",
       ...(httpMethod === "GET" ? { searchParams: payload } : { form: payload }),
     });

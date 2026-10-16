@@ -1,11 +1,15 @@
 import type SteamID from "steamid";
 import { URLS } from "../core/constants.js";
 import { EConfirmationType } from "../core/enums.js";
-import { ConfirmationError, SteamSessionExpiredError } from "../core/errors.js";
+import {
+  ConfirmationError,
+  ConfirmationOutcomeUnknownError,
+  SteamSessionExpiredError,
+} from "../core/errors.js";
 import type { MobileProfile } from "../core/mobileProfile.js";
 import * as SteamTotp from "../crypto/steamTotp.js";
 import { httpError } from "../http/checkers.js";
-import type { HttpClient } from "../http/HttpClient.js";
+import { type HttpClient, type RequestControl, requestControl } from "../http/HttpClient.js";
 import { queryServerTimeOffset } from "../http/queryTime.js";
 
 export interface Confirmation {
@@ -74,9 +78,13 @@ export class ConfirmationManager {
       : android;
   }
 
-  async getConfirmations(time: number, key: ConfKey): Promise<Confirmation[]> {
+  async getConfirmations(
+    time: number,
+    key: ConfKey,
+    control?: RequestControl,
+  ): Promise<Confirmation[]> {
     const { tag, k } = splitKey(key, "conf");
-    const body = await this.getlist(k, time, tag);
+    const body = await this.getlist(k, time, tag, control);
     if (!body?.success) {
       if (body?.needauth) throw new SteamSessionExpiredError();
       throw new ConfirmationError(
@@ -104,6 +112,7 @@ export class ConfirmationManager {
     time: number,
     key: ConfKey,
     accept: boolean,
+    control?: RequestControl,
   ): Promise<void> {
     const ids = Array.isArray(confID) ? confID : [confID];
     const keys = Array.isArray(confKey) ? confKey : [confKey];
@@ -116,6 +125,7 @@ export class ConfirmationManager {
     const res = await this.http.post<RawConfActionResponse>(
       `${URLS.community}/mobileconf/multiajaxop`,
       {
+        ...requestControl(control),
         responseType: "json",
         searchParams: { ...this.confParams(k, time, tag), op },
         multipart: ids.flatMap((id, i) => [
@@ -126,16 +136,17 @@ export class ConfirmationManager {
     );
     if (res.statusCode !== 200) throw httpError(res);
     if (res.body?.success) return;
+    if (res.body === undefined || res.body === null) throw new ConfirmationOutcomeUnknownError();
     throw new ConfirmationError(String(res.body?.message ?? "Could not act on confirmation"));
   }
 
   // All pending confirmations, with the list HMAC derived for you (needs identitySecret).
-  async getPending(): Promise<Confirmation[]> {
+  async getPending(control?: RequestControl): Promise<Confirmation[]> {
     const secret = this.requireSecret();
-    const offset = await this.getTimeOffset();
+    const offset = await this.getTimeOffset(control);
     const listTime = SteamTotp.time(offset);
     const listKey = SteamTotp.getConfirmationKey(secret, listTime, "list");
-    return this.getConfirmations(listTime, { tag: "list", key: listKey });
+    return this.getConfirmations(listTime, { tag: "list", key: listKey }, control);
   }
 
   // Accept a single confirmation by id + nonce (its `key`).
@@ -149,12 +160,18 @@ export class ConfirmationManager {
   }
 
   // Accept / reject a caller-selected set in one multiajaxop request. No-op when empty.
-  acceptConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void> {
-    return this.actOnConfirmations(confs, true);
+  acceptConfirmations(
+    confs: Pick<Confirmation, "id" | "key">[],
+    control?: RequestControl,
+  ): Promise<void> {
+    return this.actOnConfirmations(confs, true, control);
   }
 
-  rejectConfirmations(confs: Pick<Confirmation, "id" | "key">[]): Promise<void> {
-    return this.actOnConfirmations(confs, false);
+  rejectConfirmations(
+    confs: Pick<Confirmation, "id" | "key">[],
+    control?: RequestControl,
+  ): Promise<void> {
+    return this.actOnConfirmations(confs, false, control);
   }
 
   // Accept every pending confirmation; returns the ones acted on. Fails fast on the first error.
@@ -173,10 +190,11 @@ export class ConfirmationManager {
   private async actOnConfirmations(
     confs: Pick<Confirmation, "id" | "key">[],
     accept: boolean,
+    control?: RequestControl,
   ): Promise<void> {
     if (confs.length === 0) return;
     const secret = this.requireSecret();
-    const offset = await this.getTimeOffset();
+    const offset = await this.getTimeOffset(control);
     const time = this.nextConfTime(offset);
     const tag = accept ? "accept" : "cancel";
     const key = SteamTotp.getConfirmationKey(secret, time, tag);
@@ -186,6 +204,7 @@ export class ConfirmationManager {
       time,
       { tag, key },
       accept,
+      control,
     );
   }
 
@@ -208,11 +227,11 @@ export class ConfirmationManager {
     return time;
   }
 
-  private async getTimeOffset(): Promise<number> {
+  private async getTimeOffset(control?: RequestControl): Promise<number> {
     if (this.timeOffset !== undefined && Date.now() - this.timeOffsetAt < TIME_OFFSET_TTL_MS) {
       return this.timeOffset;
     }
-    const offset = await queryServerTimeOffset(this.http);
+    const offset = await queryServerTimeOffset(this.http, control);
     this.timeOffset = offset;
     this.timeOffsetAt = Date.now();
     return offset;
@@ -230,8 +249,14 @@ export class ConfirmationManager {
     };
   }
 
-  private async getlist(key: string, time: number, tag: string): Promise<RawConfListResponse> {
+  private async getlist(
+    key: string,
+    time: number,
+    tag: string,
+    control?: RequestControl,
+  ): Promise<RawConfListResponse> {
     const res = await this.http.get<RawConfListResponse>(`${URLS.community}/mobileconf/getlist`, {
+      ...requestControl(control),
       responseType: "json",
       searchParams: this.confParams(key, time, tag),
     });
